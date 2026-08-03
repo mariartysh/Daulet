@@ -5,6 +5,19 @@ const tg = require('../lib/tg');
 const L = require('../lib/logic');
 
 const ADMIN = (process.env.ADMIN_USERNAME || 'gaucho_bro').toLowerCase().replace('@', '');
+const CHAIN_TTL = 100e3;
+
+// Поднять фоновую цепочку, если порвалась
+function reviveChain(s) {
+  if (!s.task.active || s.botOn === false || !process.env.TICK_KEY) return false;
+  if (s.chainAt && Date.now() - s.chainAt < CHAIN_TTL) return false;
+  const base = (process.env.APP_URL || '').replace(/\/+$/, '');
+  if (!base) return false;
+  s.chainAt = Date.now();
+  try { fetch(base + '/api/tick?key=' + encodeURIComponent(process.env.TICK_KEY) + '&chain=1').catch(() => {}); } catch (e) {}
+  return true;
+}
+const bgAlive = s => !!(s.chainAt && Date.now() - s.chainAt < CHAIN_TTL);
 const APP_URL = (process.env.APP_URL || '').trim();
 const DAY = ['Сегодня', 'Завтра', 'Послезавтра'];
 const kb = rows => ({ reply_markup: { inline_keyboard: rows } });
@@ -40,6 +53,7 @@ module.exports = async (req, res) => {
   } catch (e) {
     store.log(s, 'Сбой в Telegram: ' + e.message, 1);
   }
+  reviveChain(s);
   await store.save(s);
   return res.status(200).json({ ok: true });
 };
@@ -57,7 +71,7 @@ function vMain(s, admin) {
   const days = (t.dayOffsets || [0]).map(o => DAY[o].toLowerCase()).join(', ');
   const off = s.botOn === false ? '🔴 <b>Бот выключен владельцем</b>\n\n' : '';
   const text = `🎾 <b>Court Hunter</b>\n\n` + off + (t.active
-    ? `🟢 <b>Ловлю прямо сейчас</b>\nПлан: ${days}, ${t.timeFrom}–${t.timeTo}, ${Math.round(t.dur / 60)} ч\nПоймано: ${act} из ${t.needed}\n\nКак только что-то освободится — напишу сюда.`
+    ? `🟢 <b>Ловлю прямо сейчас</b>\nПлан: ${days}, ${L.hourLabel(parseInt(t.timeFrom))}–${L.hourLabel(parseInt(t.timeTo))}, ${Math.round(t.dur / 60)} ч\nПоймано: ${act} из ${t.needed}\n\n${bgAlive(s) ? '📡 Фоновый поиск работает — телефон можно закрыть.' : '⏳ Поднимаю фоновый поиск…'}`
     : `⚪ <b>Сплю</b>\nПлан: ${days}, ${t.timeFrom}–${t.timeTo}, ${Math.round(t.dur / 60)} ч · нужно кортов: ${t.needed}\nПоймано: ${act} из ${t.needed}\n\nПроверьте план и жмите «Начать охоту».`);
   const rows = [
     [t.active ? btn('⏹ Остановить охоту', 'M|stop') : btn('▶️ Начать охоту', 'M|go')],

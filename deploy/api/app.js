@@ -1,5 +1,18 @@
 // API панели: логин, состояние, автосохранение, старт/стоп, проверка, отмена.
 const crypto = require('crypto');
+const CHAIN_TTL = 100e3;
+
+// Поднять фоновую цепочку, если она порвалась (вызов не ждём)
+function reviveChain(s, req) {
+  if (!s.task.active || s.botOn === false || !process.env.TICK_KEY) return false;
+  if (s.chainAt && Date.now() - s.chainAt < CHAIN_TTL) return false;
+  const base = (process.env.APP_URL || '').replace(/\/+$/, '')
+    || (req.headers['x-forwarded-host'] || req.headers.host ? 'https://' + (req.headers['x-forwarded-host'] || req.headers.host) : '');
+  if (!base) return false;
+  s.chainAt = Date.now();
+  try { fetch(base + '/api/tick?key=' + encodeURIComponent(process.env.TICK_KEY) + '&chain=1').catch(() => {}); } catch (e) {}
+  return true;
+}
 const store = require('../lib/store');
 const hunt = require('../lib/hunt');
 const L = require('../lib/logic');
@@ -30,6 +43,7 @@ module.exports = async (req, res) => {
   try {
     switch (body.action) {
       case 'state': {
+        if (reviveChain(s, req)) { store.log(s, 'Фоновый поиск перезапущен'); await store.save(s); }
         const act = hunt.activeBookings(s).sort((a, b) => a.start - b.start);
         return res.status(200).json({
           ok: true,
@@ -37,6 +51,8 @@ module.exports = async (req, res) => {
           tg: (s.chats || []).length,
           botOn: s.botOn !== false,
           lastTick: s.lastTick || 0,
+          chainAt: s.chainAt || 0,
+          bg: !!(s.chainAt && Date.now() - s.chainAt < CHAIN_TTL),
           bookings: act.map(b => {
             const d = L.deadlines(b.start);
             return { id: b.id, title: hunt.courtTitle(b, b.name), when: L.whenText(b.start, b.dur), start: b.start,
@@ -87,12 +103,15 @@ module.exports = async (req, res) => {
         store.log(s, `Охота запущена: нужно ${s.task.needed}, ${s.task.timeFrom}–${s.task.timeTo}`);
         await hunt.sendAll(s, '🟢 <b>Охота запущена</b> — из панели.\n\n' + hunt.statusText(s));
         await hunt.sweep(s).catch(e => store.log(s, 'Первый проход не удался: ' + e.message, 1));
+        s.chainAt = 0;
+        reviveChain(s, req);
         await store.save(s);
         return res.status(200).json({ ok: true });
       }
       case 'stop': {
         const was = s.task.active;
         s.task.active = false;
+        s.chainAt = 0;
         store.log(s, 'Охота остановлена из панели');
         if (was) await hunt.sendAll(s, '⏹ <b>Охота остановлена</b> — из панели.\nВключить снова: /menu');
         await store.save(s);

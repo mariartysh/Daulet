@@ -281,7 +281,7 @@ function demoApi(action,extra){
   const a=hunt=>({ok:true,...hunt});
   switch(action){
     case 'login':return {ok:extra.password==='MeiroDictador1995',token:'demo',error:'Пароль не подошёл'};
-    case 'state':return a({task:{active:TASK.active,needed:TASK.needed},profile:demo.profile,stats:demo.stats,tg:1,
+    case 'state':return a({task:{active:TASK.active,needed:TASK.needed},bg:TASK.active,lastTick:Date.now(),profile:demo.profile,stats:demo.stats,tg:1,
       bookings:demo.bookings.filter(b=>!b.cancelled).map(b=>({id:b.id,title:b.title,when:dWhen(b.start),start:b.start,price:b.price,online:b.start-5*36e5,phone:b.start-3*36e5,midnight:new Date(b.start).getHours()===0})),
       offers:demo.offers.map(o=>({id:o.id,title:o.title,when:dWhen(o.start),price:o.price,start:o.start,midnight:new Date(o.start).getHours()===0})),
       log:demo.log.map(l=>({t:l.t,m:l.m}))});
@@ -452,8 +452,12 @@ async function refresh(){
   $('statusSub').textContent=n>=need&&n>0?'все корты пойманы 🏁':'поймано кортов';
   $('pbar').style.width=Math.min(100,Math.round(n/Math.max(1,need)*100))+'%';
   {const lt=r.lastTick||0,age=lt?Math.round((Date.now()-lt)/1000):null;
-   const tick=age===null?'автопроверки ещё не было':age<90?'автопроверка '+age+' с назад':age<3600?'автопроверка '+Math.round(age/60)+' мин назад':'автопроверка давно — проверьте пингер';
-   $('stLine').textContent=`проверок ${r.stats.checks} · находок ${r.stats.found} · ${tick}`;}
+   let bg;
+   if(!r.task.active)bg='фон не нужен — охота на паузе';
+   else if(r.bg)bg='📡 фон работает, телефон можно закрыть';
+   else if(age!==null&&age<180)bg='📡 фон поднимается…';
+   else bg='⚠️ фон не отвечает — проверьте пингер';
+   $('stLine').textContent=`проверок ${r.stats.checks} · находок ${r.stats.found} · ${bg}`;}
   const offs=r.offers||[],ob=$('offers');
   const sig=offs.map(o=>o.id).join(',');
   if(sig&&sig!==window.__offSig){window.__offSig=sig;buzz('success');}

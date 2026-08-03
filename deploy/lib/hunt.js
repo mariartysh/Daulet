@@ -335,6 +335,7 @@ function statusText(s) {
   out += `🎾 ${type}${nums} · ${t.mode === 'auto' ? 'бронирую сразу' : 'сначала спрашиваю'}\n`;
   out += `🔁 Проверок ${s.stats.checks} · находок ${s.stats.found}${s.stats.errors ? ` · сбоев ${s.stats.errors}` : ''}`;
   if (s.targets && s.targets.list) out += `\n🏟 Кортов вижу: ${s.targets.list.length}`;
+  if (t.active) out += `\n📡 Фоновый поиск: ${s.chainAt && Date.now() - s.chainAt < 100e3 ? 'работает' : 'перезапускается'}`;
   if (act.length) {
     out += '\n\n<b>Брони:</b>';
     for (const b of act) {
