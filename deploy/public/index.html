@@ -82,6 +82,7 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
 </style>
 </head>
 <body>
+<script>try{if(localStorage.getItem('ab_token'))document.documentElement.setAttribute('data-signed','1');}catch(e){}</script>
 <div id="gate" style="display:none">
   <div class="card" style="width:min(400px,94vw);gap:16px">
     <div style="font-size:44px">🎾</div>
@@ -188,7 +189,7 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
     </div>
   </div>
 
-  <div class="sub" style="padding:0 6px">В Telegram то же самое кнопками: команда /menu. Слот «завтра 00:00» — это сегодня в полночь, бот сам это учитывает.</div>
+  <div class="sub" style="padding:0 6px">В Telegram то же самое кнопками: /menu. Слот «завтра 00:00» — это сегодня в полночь, бот сам это учитывает.</div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -428,12 +429,16 @@ async function refresh(){
 }
 
 (async()=>{
+  // если вход уже был — сразу показываем панель, без вспышки пароля
+  const signed=document.documentElement.getAttribute('data-signed')==='1';
+  if(signed)document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');
   THEME=(await stg.get('ab_theme'))||'auto';applyTheme();
   try{const t=JSON.parse(await stg.get('ab_task')||'null');if(t)TASK={...DEF,...t};}catch(e){}
   try{const p=JSON.parse(await stg.get('ab_prof')||'null');if(p)PROF={...PROF,...p};}catch(e){}
   renderTask();fillProfile();
   TOKEN=(await stg.get('ab_token'))||'';
   if(TOKEN){const r=await api('state');if(r.ok){enter();return;}TOKEN='';stg.set('ab_token','');}
+  document.querySelectorAll('[data-app]').forEach(x=>x.style.display='none');
   $('gate').style.display='flex';
 })();
 </script>

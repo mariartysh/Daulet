@@ -45,6 +45,7 @@ module.exports = async (req, res) => {
         });
       }
       case 'save': {
+        const before = JSON.stringify({ ...s.task, active: 0 });
         if (body.task) {
           const t = { ...s.task, ...body.task };
           t.active = s.task.active; // запуск только явной командой
@@ -61,6 +62,11 @@ module.exports = async (req, res) => {
           s.profile.phone = normPhone(body.profile.phone) || String(body.profile.phone || '').slice(0, 20);
           s.profile.email = String(body.profile.email || '').slice(0, 80);
         }
+        const changed = JSON.stringify({ ...s.task, active: 0 }) !== before;
+        if (changed && s.task.active && Date.now() - (s.lastPlanPing || 0) > 120e3) {
+          s.lastPlanPing = Date.now();
+          await hunt.sendAll(s, '✏️ <b>План поменяли в панели</b> — ловлю уже по-новому.\n\n' + hunt.statusText(s));
+        }
         await store.save(s);
         return res.status(200).json({ ok: true });
       }
@@ -70,19 +76,21 @@ module.exports = async (req, res) => {
         s.task.active = true;
         s.stats.startedAt = Date.now();
         store.log(s, `Охота запущена: нужно ${s.task.needed}, ${s.task.timeFrom}–${s.task.timeTo}`);
-        await hunt.sendAll(s, '🟢 Охота запущена из панели.\n' + hunt.statusText(s));
+        await hunt.sendAll(s, '🟢 <b>Охота запущена</b> — из панели.\n\n' + hunt.statusText(s));
         await store.save(s);
         return res.status(200).json({ ok: true });
       }
       case 'stop': {
+        const was = s.task.active;
         s.task.active = false;
         store.log(s, 'Охота остановлена из панели');
+        if (was) await hunt.sendAll(s, '⏹ <b>Охота остановлена</b> — из панели.\nВключить снова: /menu');
         await store.save(s);
         return res.status(200).json({ ok: true });
       }
       case 'cancelBooking': {
         const r = await hunt.doCancel(s, body.id);
-        if (r.ok) await hunt.sendAll(s, `↩️ Бронь отменена из панели: ${hunt.courtTitle(r.b, r.b.name)} · ${L.whenText(r.b.start, r.b.dur)}`);
+        if (r.ok) await hunt.sendAll(s, `↩️ <b>Бронь отменена</b> — из панели.\n${hunt.courtTitle(r.b, r.b.name)} · ${L.whenText(r.b.start, r.b.dur)}\nСлот снова свободен на сайте.`);
         await store.save(s);
         return res.status(200).json(r.ok ? { ok: true } : { ok: false, error: r.why });
       }
