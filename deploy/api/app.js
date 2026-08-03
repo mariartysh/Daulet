@@ -35,12 +35,14 @@ module.exports = async (req, res) => {
           ok: true,
           task: s.task, profile: s.profile, stats: s.stats,
           tg: (s.chats || []).length,
+          botOn: s.botOn !== false,
           bookings: act.map(b => {
             const d = L.deadlines(b.start);
             return { id: b.id, title: hunt.courtTitle(b, b.name), when: L.whenText(b.start, b.dur), start: b.start,
               price: b.price, online: d.online, phone: d.phone,
               midnight: L.hm(b.start) === '00:00' };
           }),
+          offers: (s.offers || []).map(o => ({ id: o.id, title: hunt.courtTitle(o, o.name), when: L.whenText(o.start, o.dur), price: o.price, start: o.start, midnight: L.hm(o.start) === '00:00' })),
           log: s.log.slice(0, 60)
         });
       }
@@ -55,6 +57,7 @@ module.exports = async (req, res) => {
           if (!['any', 'indoor', 'outdoor'].includes(t.type)) t.type = 'any';
           if (![60, 120, 180].includes(t.dur)) t.dur = 60;
           if (t.type === 'any') t.courts = [];
+          L.fitWindow(t);
           s.task = t;
         }
         if (body.profile) {
@@ -71,6 +74,7 @@ module.exports = async (req, res) => {
         return res.status(200).json({ ok: true });
       }
       case 'start': {
+        if (s.botOn === false) return res.status(200).json({ ok: false, error: 'Бот выключен владельцем' });
         if (!s.profile.phone || !s.profile.name) return res.status(200).json({ ok: false, error: 'Сначала имя и телефон — на кого бронировать?' });
         if (hunt.activeBookings(s).length >= s.task.needed) return res.status(200).json({ ok: false, error: 'Цель уже набрана — увеличьте «сколько кортов»' });
         s.task.active = true;
@@ -94,12 +98,23 @@ module.exports = async (req, res) => {
         await store.save(s);
         return res.status(200).json(r.ok ? { ok: true } : { ok: false, error: r.why });
       }
+      case 'takeOffer': {
+        const r = await hunt.takeOffer(s, body.id);
+        await store.save(s);
+        return res.status(200).json(r.ok ? { ok: true } : { ok: false, error: r.why });
+      }
+      case 'skipOffer': {
+        hunt.dropOffer(s, body.id);
+        await store.save(s);
+        return res.status(200).json({ ok: true });
+      }
       case 'probe': {
         const out = { tg: !!process.env.TELEGRAM_TOKEN, tgLinked: (s.chats || []).length, kv: !!process.env.UPSTASH_REDIS_REST_URL };
         try {
-          const list = await hunt.ensureStaff(s);
+          const list = await hunt.ensureTargets(s);
           out.altegio = true;
           out.courts = list.length;
+          out.matching = list.filter(x => L.courtOk(s.task, x)).length;
         } catch (e) { out.altegio = false; out.error = e.message; }
         await store.save(s);
         return res.status(200).json({ ok: true, probe: out });

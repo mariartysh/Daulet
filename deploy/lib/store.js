@@ -17,7 +17,8 @@ async function cmd(arr) {
 function defaults() {
   return {
     password: process.env.APP_PASSWORD || 'admin',
-    chats: [],               // подключённые Telegram-чаты [{id, name, u}]
+    botOn: true,             // глобальный выключатель (только владелец)
+    chats: [],               // чаты [{id, name, u, at, last, acts}]
     pending: null,           // {chat, field} — ждём текстовый ввод (имя/телефон/почта)
     profile: { name: '', phone: '', email: '' },
     task: {
@@ -31,6 +32,7 @@ function defaults() {
       dur: 60                // минуты: 60 | 120 | 180
     },
     bookings: [],            // {id, recordId, hash, staffId, court, indoor, name, start, dur, price, service, cancelled}
+    offers: [],              // найденные слоты, ждут «Забрать»/«Пропустить»
     seen: {},                // slotKey -> ts (анти-дубль)
     reminded: {},            // bookingId -> 1
     stats: { checks: 0, found: 0, booked: 0, errors: 0, startedAt: 0 },
@@ -51,6 +53,8 @@ async function load() {
   if (s.ownerChat && !(s.chats || []).length) s.chats = [{ id: s.ownerChat, name: 'владелец' }];
   if (!s.task.dayOffsets) s.task.dayOffsets = [0];
   if (![60, 120, 180].includes(s.task.dur)) s.task.dur = 60;
+  if (!Array.isArray(s.offers)) s.offers = [];
+  if (s.botOn === undefined) s.botOn = true;
   return s;
 }
 
@@ -58,6 +62,7 @@ async function save(s) {
   const now = Date.now();
   for (const k of Object.keys(s.seen)) if (s.seen[k] < now - 3 * 86400e3) delete s.seen[k];
   s.log = s.log.slice(0, 150);
+  s.offers = (s.offers || []).filter(o => o.start > now + 10 * 60e3).slice(0, 12);
   if (!URL_ || !TOK) { mem = s; return; }
   await cmd(['SET', KEY, JSON.stringify(s)]);
 }

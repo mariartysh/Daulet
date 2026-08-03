@@ -11,6 +11,16 @@ const kb = rows => ({ reply_markup: { inline_keyboard: rows } });
 const btn = (text, data) => ({ text, callback_data: data });
 const appBtn = () => APP_URL ? [{ text: '📱 Открыть панель', web_app: { url: APP_URL } }] : null;
 
+// Постоянная клавиатура под полем ввода — команды вручную не нужны
+const TOASTER = {
+  keyboard: [
+    [{ text: '🎾 Меню' }, { text: '📊 Статус' }],
+    [{ text: '📋 Брони' }, { text: '⏹ Стоп' }],
+    [{ text: '❓ Помощь' }]
+  ],
+  resize_keyboard: true, is_persistent: true, input_field_placeholder: 'Жмите кнопки 👇'
+};
+
 const COMMANDS = [
   { command: 'menu', description: '🎾 Меню — всё управление' },
   { command: 'status', description: '📊 Что происходит сейчас' },
@@ -35,13 +45,18 @@ module.exports = async (req, res) => {
 };
 
 const linked = (s, chat) => (s.chats || []).some(c => (c.id || c) === chat);
+function touch(s, chat) {
+  const c = (s.chats || []).find(x => x.id === chat);
+  if (c) { c.last = Date.now(); c.acts = (c.acts || 0) + 1; }
+}
 const isAdmin = from => (((from && from.username) || '').toLowerCase() === ADMIN);
 
 // ---------- экраны ----------
 function vMain(s, admin) {
   const t = s.task, act = hunt.activeBookings(s).length;
   const days = (t.dayOffsets || [0]).map(o => DAY[o].toLowerCase()).join(', ');
-  const text = `🎾 <b>Court Hunter</b>\n\n` + (t.active
+  const off = s.botOn === false ? '🔴 <b>Бот выключен владельцем</b>\n\n' : '';
+  const text = `🎾 <b>Court Hunter</b>\n\n` + off + (t.active
     ? `🟢 <b>Ловлю прямо сейчас</b>\nПлан: ${days}, ${t.timeFrom}–${t.timeTo}, ${Math.round(t.dur / 60)} ч\nПоймано: ${act} из ${t.needed}\n\nКак только что-то освободится — напишу сюда.`
     : `⚪ <b>Сплю</b>\nПлан: ${days}, ${t.timeFrom}–${t.timeTo}, ${Math.round(t.dur / 60)} ч · нужно кортов: ${t.needed}\nПоймано: ${act} из ${t.needed}\n\nПроверьте план и жмите «Начать охоту».`);
   const rows = [
@@ -62,7 +77,7 @@ function vHelp(s) {
 Корты в Даулете разбирают за минуты. Я обновляю расписание каждые ~15 секунд и хватаю то, что подходит под ваш план.
 
 <b>1. Когда</b> — день (сегодня / завтра / послезавтра — дальше сайт не открывает), окно времени и длительность.
-<b>2. Фильтр</b> — крытый или уличный, конкретный номер, и главное: бронировать сразу или сначала спросить.
+<b>2. Фильтр</b> — крытый или открытый, конкретный номер, и главное: бронировать сразу или сначала спросить.
 <b>3. Кто играет</b> — имя и телефон, на них оформляется бронь. Оплата на месте.
 <b>4. Начать охоту</b> — дальше я сам.
 
@@ -82,10 +97,11 @@ function vHelp(s) {
 function vWhen(s) {
   const t = s.task;
   const dayRow = [0, 1, 2].map(o => btn(`${(t.dayOffsets || []).includes(o) ? '✅ ' : ''}${DAY[o]}`, `Wd|${o}`));
-  return { text: `🗓 <b>Когда играем</b>\n\nСейчас ловлю: ${(t.dayOffsets || [0]).map(o => DAY[o].toLowerCase()).join(', ')}, с ${t.timeFrom} до ${t.timeTo}, по ${Math.round(t.dur / 60)} ч. Кортов нужно: ${t.needed}.\n\nЖмите кнопки — всё сохраняется сразу.`, ...kb([
+  const night = parseInt(t.timeTo) > 23 ? '\n🌙 Ночные слоты включены: на сайте это «завтра 00:00/01:00», играете этой же ночью.' : '';
+  return { text: `🗓 <b>Когда играем</b>\n\nСейчас ловлю: ${(t.dayOffsets || [0]).map(o => DAY[o].toLowerCase()).join(', ')}, с ${L.hourLabel(parseInt(t.timeFrom))} до ${L.hourLabel(parseInt(t.timeTo))}, по ${Math.round(t.dur / 60)} ч. Кортов нужно: ${t.needed}.${night}\n\nЖмите кнопки — всё сохраняется сразу.`, ...kb([
     dayRow,
-    [btn('−', 'Wf|-1'), btn(`начало  ${t.timeFrom}`, 'x'), btn('+', 'Wf|1')],
-    [btn('−', 'Wt|-1'), btn(`конец  ${t.timeTo}`, 'x'), btn('+', 'Wt|1')],
+    [btn('−', 'Wf|-1'), btn(`начало  ${L.hourLabel(parseInt(t.timeFrom))}`, 'x'), btn('+', 'Wf|1')],
+    [btn('−', 'Wt|-1'), btn(`конец  ${L.hourLabel(parseInt(t.timeTo))}`, 'x'), btn('+', 'Wt|1')],
     [btn(`${t.dur === 60 ? '✅ ' : ''}1 час`, 'Du|60'), btn(`${t.dur === 120 ? '✅ ' : ''}2 часа`, 'Du|120'), btn(`${t.dur === 180 ? '✅ ' : ''}3 часа`, 'Du|180')],
     [btn('−', 'N|-1'), btn(`кортов нужно  ${t.needed}`, 'x'), btn('+', 'N|1')],
     [btn('⬅️ В меню', 'V|main')]
@@ -95,10 +111,10 @@ function vWhen(s) {
 function vFilters(s) {
   const t = s.task;
   const rows = [
-    [btn(`${t.type === 'any' ? '✅ ' : ''}Любой`, 'Ft|any'), btn(`${t.type === 'indoor' ? '✅ ' : ''}Крытый`, 'Ft|indoor'), btn(`${t.type === 'outdoor' ? '✅ ' : ''}Уличный`, 'Ft|outdoor')]
+    [btn(`${t.type === 'any' ? '✅ ' : ''}Любой`, 'Ft|any'), btn(`${t.type === 'indoor' ? '✅ ' : ''}Крытый`, 'Ft|indoor'), btn(`${t.type === 'outdoor' ? '✅ ' : ''}Открытый`, 'Ft|outdoor')]
   ];
   let note = '';
-  if (t.type === 'any') note = '\n\nНомер можно выбрать после типа: у крытых №1–8 и уличных №1–5 нумерация своя.';
+  if (t.type === 'any') note = '\n\nНомер можно выбрать после типа: у крытых №1–8 и открытых №1–5 нумерация своя.';
   else {
     const maxN = t.type === 'indoor' ? 8 : 5;
     const nums = [btn(`${!t.courts.length ? '✅ ' : ''}Любой №`, 'Fc|0')];
@@ -142,15 +158,37 @@ function vStatus(s) {
   return { text: '📊 <b>Статус</b>\n\n' + hunt.statusText(s), ...kb([[btn('🔄 Обновить', 'V|status'), btn('⬅️ В меню', 'V|main')]]) };
 }
 
+function ago(ts) {
+  if (!ts) return 'ещё не заходил';
+  const m = Math.floor((Date.now() - ts) / 60000);
+  if (m < 1) return 'только что';
+  if (m < 60) return `${m} мин назад`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} ч назад`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? 'вчера' : `${d} дн назад`;
+}
+
 function vAdmin(s) {
   const list = s.chats || [];
-  let text = `👑 <b>Админ-панель</b>\n\nПодключено чатов: ${list.length}\n`;
+  const on = s.botOn !== false;
+  let text = `👑 <b>Админ-панель</b>\n\n` +
+    `Бот: ${on ? '🟢 включён' : '🔴 выключен для всех'}\n` +
+    `Охота: ${s.task.active ? 'идёт' : 'на паузе'} · поймано ${hunt.activeBookings(s).length} из ${s.task.needed}\n` +
+    `Пользователей: ${list.length}\n`;
   list.forEach((c, i) => {
-    text += `\n${i + 1}. ${c.name || 'без имени'}${c.u ? ' · @' + c.u : ''}${(c.u || '').toLowerCase() === ADMIN ? ' 👑' : ''}\n   id ${c.id}`;
+    const me = (c.u || '').toLowerCase() === ADMIN;
+    text += `\n${i + 1}. ${c.u ? '@' + c.u : (c.name || 'без ника')}${me ? ' 👑 (вы)' : ''}\n` +
+      `    ${c.name || '—'} · id <code>${c.id}</code>\n` +
+      `    подключён: ${c.at ? L.fmt(c.at) : '—'}\n` +
+      `    был: ${ago(c.last)} · действий: ${c.acts || 0}`;
   });
-  text += `\n\nПароль доступа: <code>${s.password}</code>\nСменить: <code>/key НовыйПароль</code> (работает только у вас)`;
-  const rows = list.filter(c => (c.u || '').toLowerCase() !== ADMIN)
-    .map(c => [btn(`🚫 Отключить ${c.name || c.id}${c.u ? ' (@' + c.u + ')' : ''}`, `A|${c.id}`)]);
+  text += `\n\nПароль: <code>${s.password}</code>\nСменить: <code>/key НовыйПароль</code>`;
+  const rows = [[on ? btn('🔴 Отключить бот', 'AB|off') : btn('🟢 Включить бот', 'AB|on')]];
+  for (const c of list) {
+    if ((c.u || '').toLowerCase() === ADMIN) continue;
+    rows.push([btn(`🚫 Отключить ${c.u ? '@' + c.u : (c.name || c.id)}`, `A|${c.id}`)]);
+  }
   rows.push([btn('🔄 Обновить', 'V|admin'), btn('⬅️ В меню', 'V|main')]);
   return { text, ...kb(rows) };
 }
@@ -164,6 +202,9 @@ async function onMessage(s, m) {
   const [cmd, ...rest] = text.split(/\s+/);
   const arg = rest.join(' ');
   const admin = isAdmin(m.from);
+  touch(s, chat);
+  if (s.botOn === false && !admin && linked(s, chat))
+    return tg.send(chat, '🔴 Бот сейчас выключен владельцем. Загляните позже.');
 
   // ---- не подключён: только пароль ----
   if (!linked(s, chat)) {
@@ -173,6 +214,8 @@ async function onMessage(s, m) {
       s.chats.push({ id: chat, name: (m.from && m.from.first_name) || '', u: (m.from && m.from.username) || '', at: Date.now() });
       store.log(s, `Подключился чат: ${(m.from && m.from.first_name) || chat}${(m.from && m.from.username) ? ' @' + m.from.username : ''}`);
       await tg.setCommands(COMMANDS);
+      if (APP_URL) await tg.call('setChatMenuButton', { chat_id: chat, menu_button: { type: 'web_app', text: 'Панель', web_app: { url: APP_URL } } });
+      await tg.send(chat, '⌨️ Кнопки внизу — вместо команд.', { reply_markup: TOASTER });
       const ab = appBtn();
       await tg.send(chat,
         `🤝 <b>Пароль принят — вы в деле!</b>\n\n` +
@@ -220,11 +263,14 @@ async function onMessage(s, m) {
     return tg.send(chat, '👌 Записал.\n\n' + v.text, { reply_markup: v.reply_markup });
   }
 
-  if (cmd === '/start' || cmd === '/menu') { const v = vMain(s, admin); return tg.send(chat, v.text, { reply_markup: v.reply_markup }); }
-  if (cmd === '/help') { const v = vHelp(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup }); }
-  if (cmd === '/status') { const v = vStatus(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup }); }
-  if (cmd === '/bookings' || cmd === '/cancel') { const v = vBookings(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup }); }
-  if (cmd === '/stop') { s.task.active = false; store.log(s, 'Охота остановлена из Telegram'); return tg.send(chat, '⏹ Остановил. Вернуться — /menu'); }
+  if (cmd === '/start' || cmd === '/menu' || text === '🎾 Меню') {
+    await tg.send(chat, '⌨️ Кнопки внизу — вместо команд.', { reply_markup: TOASTER });
+    const v = vMain(s, admin); return tg.send(chat, v.text, { reply_markup: v.reply_markup });
+  }
+  if (cmd === '/help' || text === '❓ Помощь') { const v = vHelp(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup }); }
+  if (cmd === '/status' || text === '📊 Статус') { const v = vStatus(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup }); }
+  if (cmd === '/bookings' || cmd === '/cancel' || text === '📋 Брони') { const v = vBookings(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup }); }
+  if (cmd === '/stop' || text === '⏹ Стоп') { s.task.active = false; store.log(s, 'Охота остановлена из Telegram'); return tg.send(chat, '⏹ Остановил. Вернуться — /menu'); }
   if (cmd === '/admin') {
     if (!admin) return tg.send(chat, '⛔️ Такой команды нет.');
     const v = vAdmin(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup });
@@ -238,6 +284,8 @@ async function onCallback(s, cb) {
   const chat = cb.message && cb.message.chat.id;
   const msgId = cb.message && cb.message.message_id;
   const admin = isAdmin(cb.from);
+  touch(s, chat);
+  if (s.botOn === false && !admin && linked(s, chat)) return tg.answerCb(cb.id, 'Бот выключен владельцем');
   if (!linked(s, chat)) { await tg.send(chat, '🔒 Сначала пришлите пароль одним сообщением.'); return tg.answerCb(cb.id, 'Нужен пароль'); }
   const [op, a, b2, c2] = String(cb.data || '').split('|');
   const t = s.task;
@@ -257,6 +305,7 @@ async function onCallback(s, cb) {
   if (op === 'M') {
     if (a === 'stop') { t.active = false; store.log(s, 'Охота остановлена кнопкой'); toast = 'Остановил'; view = 'main'; }
     else if (a === 'go') {
+      if (s.botOn === false) return tg.answerCb(cb.id, 'Бот выключен владельцем');
       if (!s.profile.name || !s.profile.phone) { await show('profile'); return tg.answerCb(cb.id, 'Сначала имя и телефон'); }
       if (hunt.activeBookings(s).length >= t.needed) { toast = 'Цель уже набрана — добавьте кортов'; view = 'when'; }
       else { t.active = true; s.stats.startedAt = Date.now(); store.log(s, `Охота запущена из Telegram: нужно ${t.needed}, ${t.timeFrom}–${t.timeTo}`); toast = 'Погнали! 🟢'; view = 'main'; }
@@ -269,17 +318,18 @@ async function onCallback(s, cb) {
     t.dayOffsets = next; view = 'when';
   }
   else if (op === 'Wf') {
-    let h = Math.max(6, Math.min(23, parseInt(t.timeFrom) + Number(a)));
-    t.timeFrom = `${String(h).padStart(2, '0')}:00`;
-    if (parseInt(t.timeTo) <= h) t.timeTo = h + 1 === 24 ? '24:00' : `${String(h + 1).padStart(2, '0')}:00`;
+    const h = Math.max(6, Math.min(24, parseInt(t.timeFrom) + Number(a)));
+    t.timeFrom = L.hourVal(h);
+    L.fitWindow(t);
     view = 'when';
   }
   else if (op === 'Wt') {
-    let h = Math.max(parseInt(t.timeFrom) + 1, Math.min(24, parseInt(t.timeTo) + Number(a)));
-    t.timeTo = h === 24 ? '24:00' : `${String(h).padStart(2, '0')}:00`;
+    const h = Math.max(parseInt(t.timeFrom) + 1, Math.min(L.MAX_H, parseInt(t.timeTo) + Number(a)));
+    t.timeTo = L.hourVal(h);
+    if (h - parseInt(t.timeFrom) < Math.round(t.dur / 60)) t.dur = 60;
     view = 'when';
   }
-  else if (op === 'Du') { t.dur = Number(a); view = 'when'; }
+  else if (op === 'Du') { t.dur = Number(a); L.fitWindow(t); view = 'when'; }
   else if (op === 'N') { t.needed = Math.max(1, Math.min(10, t.needed + Number(a))); view = 'when'; }
   else if (op === 'Ft') { t.type = a; t.courts = []; view = 'filters'; }
   else if (op === 'Fc') {
@@ -296,6 +346,14 @@ async function onCallback(s, cb) {
     await tg.send(chat, '✏️ ' + ask);
     return tg.answerCb(cb.id, '');
   }
+  else if (op === 'AB') { // включить/выключить бота целиком
+    if (!admin) return tg.answerCb(cb.id, 'Только для владельца');
+    s.botOn = a === 'on';
+    if (!s.botOn) s.task.active = false;
+    store.log(s, s.botOn ? 'Владелец включил бота' : 'Владелец выключил бота');
+    await show('admin');
+    return tg.answerCb(cb.id, s.botOn ? 'Бот включён 🟢' : 'Бот выключен 🔴');
+  }
   else if (op === 'A') { // отключить чат (только владелец)
     if (!admin) return tg.answerCb(cb.id, 'Только для владельца');
     const id = Number(a);
@@ -306,12 +364,15 @@ async function onCallback(s, cb) {
     await show('admin');
     return tg.answerCb(cb.id, 'Отключил');
   }
-  else if (op === 'b') { // забрать слот
-    if (hunt.activeBookings(s).length >= t.needed) return tg.answerCb(cb.id, 'Цель уже набрана');
-    const startMs = Number(c2) * 1000;
-    if (Date.now() > startMs - 10 * 60e3) return tg.answerCb(cb.id, 'Этот слот уже в прошлом');
-    const r = await hunt.doBook(s, Number(a), Number(b2) || null, startMs);
-    return tg.answerCb(cb.id, r.ok ? 'Есть! Забронировал 🎾' : 'Не вышло — слот увели');
+  else if (op === 'b') { // забрать предложенный слот
+    const r = await hunt.takeOffer(s, a);
+    if (!r.ok) await tg.send(chat, '⚠️ ' + r.why);
+    return tg.answerCb(cb.id, r.ok ? 'Есть! Забронировал 🎾' : 'Не вышло');
+  }
+  else if (op === 'sk') { // пропустить предложение
+    hunt.dropOffer(s, a);
+    await tg.edit(chat, msgId, ((cb.message && cb.message.text) || 'Предложение') + '\n\n✖️ Пропущено', {});
+    return tg.answerCb(cb.id, 'Ок, пропустил');
   }
   else if (op === 'c') { // отмена брони
     const r = await hunt.doCancel(s, a);

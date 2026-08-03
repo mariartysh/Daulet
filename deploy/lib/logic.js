@@ -22,11 +22,15 @@ const whenText = (startMs, durMin) => `${cap(dayWord(startMs))} ${hm(startMs)}�
 
 // «00:00 завтра» на сайте = сегодня в полночь — подписываем явно
 function midnightNote(ms) {
-  if (hm(ms) !== '00:00') return '';
-  return `\n🌙 Это ${dayWord(ms - 86400e3)} в полночь (сайт показывает такой слот как «${dayWord(ms)} 00:00»)`;
+  const t = hm(ms);
+  if (t !== '00:00' && t !== '01:00') return '';
+  return `\n🌙 Это ночь ${dayWord(ms - 86400e3)}→${dayWord(ms)}: играете ${dayWord(ms - 86400e3)} после полуночи (сайт пишет «${dayWord(ms)} ${t}»)`;
 }
 
 const parseHM = s => { const [h, m] = String(s).split(':').map(Number); return h * 60 + (m || 0); };
+const MAX_H = 25;                                  // до 01:00 ночи — дальше корты закрыты
+const hourVal = h => `${String(h).padStart(2, '0')}:00`;   // 24:00 / 25:00 — «ночные» значения
+const hourLabel = h => h === 24 ? '00:00 · полночь' : h === 25 ? '01:00 · ночью' : hourVal(h);
 
 // Начало локального дня (мс UTC) со сдвигом off дней от сегодня
 function dayStart(nowMs, off) {
@@ -39,23 +43,21 @@ function dayStart(nowMs, off) {
 function taskDates(task, nowMs) {
   const offs = (task.dayOffsets && task.dayOffsets.length ? task.dayOffsets : [0, 1, 2])
     .filter(o => o >= 0 && o <= 2).sort();
-  const out = offs.map(o => ({ iso: localISODate(dayStart(nowMs, o)), midnightOnly: false }));
-  if (parseHM(task.timeTo || '24:00') >= 1440) {
+  const out = offs.map(o => ({ iso: localISODate(dayStart(nowMs, o)), carry: 0 }));
+  if (parseHM(task.timeTo || '22:00') > 1440) {          // окно уходит за полночь
     for (const o of offs) {
       const next = localISODate(dayStart(nowMs, o + 1));
-      if (!out.some(x => x.iso === next)) out.push({ iso: next, midnightOnly: true });
+      if (!out.some(x => x.iso === next && !x.carry)) out.push({ iso: next, carry: 1 });
     }
   }
   return out;
 }
 
 function slotMatches(task, dateEntry, startMs, nowMs) {
-  if (startMs < nowMs + 10 * 60e3) return false; // не бронируем впритык
-  const mins = parseHM(hm(startMs));
-  if (dateEntry.midnightOnly) return mins === 0;
-  const fromM = parseHM(task.timeFrom || '00:00');
-  const toM = parseHM(task.timeTo || '24:00');
-  if (mins === 0 && toM >= 1440) return true;
+  if (startMs < nowMs + 10 * 60e3) return false;        // не бронируем впритык
+  const mins = parseHM(hm(startMs)) + (dateEntry.carry ? 1440 : 0);
+  const fromM = parseHM(task.timeFrom || '20:00');
+  const toM = parseHM(task.timeTo || '22:00');
   return mins >= fromM && mins + (task.dur || 60) <= toM;
 }
 
@@ -64,10 +66,13 @@ const deadlines = startMs => ({ online: startMs - 5 * 3600e3, phone: startMs - 3
 
 const slotKey = (staffId, startMs) => `${staffId}:${Math.floor(startMs / 60000)}`;
 
-// Корт из имени сотрудника Altegio. В Даулете: крытые №1–8, уличные №1–5 (нумерация раздельная).
+// Корт из названия (сотрудник ИЛИ услуга). В Даулете: крытые №1–8, открытые №1–5 — нумерация раздельная.
+// Понимаем варианты: «Корт 3», «Корт №3», «Крытый корт 3», «Открытый корт №2», «Court 5».
 function parseCourt(name) {
-  const n = (String(name).match(/корт\D*(\d+)/i) || [])[1];
-  const indoor = /крыт/i.test(name) ? true : /откр|улич|грунт/i.test(name) ? false : null;
+  const s = String(name || '');
+  const n = (s.match(/(?:корт|court)\s*[№#nN]?\s*(\d{1,2})/i) || [])[1] || (s.match(/[№#]\s*(\d{1,2})/) || [])[1];
+  const indoor = /крыт|indoor|манеж|зал/i.test(s) ? true
+    : /откр|улич|outdoor|грунт|хард|air/i.test(s) ? false : null;
   return { court: n ? Number(n) : null, indoor };
 }
 
@@ -79,4 +84,19 @@ function courtOk(task, meta) {
   return true;
 }
 
-module.exports = { OFF, local, localISODate, hm, dm, wd, fmt, dayWord, cap, whenText, midnightNote, parseHM, dayStart, taskDates, slotMatches, deadlines, slotKey, parseCourt, courtOk };
+// Окно времени должно вмещать длительность, иначе искать нечего.
+// Мягко расширяем конец, при необходимости сдвигаем начало.
+function fitWindow(t) {
+  let f = Math.max(6, Math.min(24, parseInt(t.timeFrom || '20:00')));
+  let to = Math.max(7, Math.min(MAX_H, parseInt(t.timeTo || '22:00')));
+  const h = Math.max(1, Math.round((t.dur || 60) / 60));
+  if (to - f < h) {
+    to = Math.min(MAX_H, f + h);
+    if (to - f < h) { f = Math.max(6, MAX_H - h); to = MAX_H; }
+  }
+  t.timeFrom = hourVal(f);
+  t.timeTo = hourVal(to);
+  return t;
+}
+
+module.exports = { fitWindow, MAX_H, hourVal, hourLabel, OFF, local, localISODate, hm, dm, wd, fmt, dayWord, cap, whenText, midnightNote, parseHM, dayStart, taskDates, slotMatches, deadlines, slotKey, parseCourt, courtOk };

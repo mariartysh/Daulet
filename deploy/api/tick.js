@@ -25,6 +25,7 @@ module.exports = async (req, res) => {
   const results = [];
   for (let i = 0; i < sweeps; i++) {
     const s = await store.load(); // свежее состояние каждый проход
+    if (s.botOn === false) { results.push({ botOff: true }); break; }
     if (!s.task.active) {
       await hunt.reminders(s);    // напоминания работают и на паузе
       await store.save(s);

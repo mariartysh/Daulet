@@ -107,6 +107,7 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
     </div>
   </div>
 
+  <div id="offers" style="display:none;flex-direction:column;gap:10px"></div>
   <div id="catchSlot"></div>
 
   <div class="card status" id="statusCard">
@@ -135,7 +136,7 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
       <div><label>До</label><select id="timeTo"></select></div>
     </div>
     <div class="row" style="align-items:flex-end">
-      <div><label>Сколько играем</label><div class="chips" id="dur"></div></div>
+      <div><label>Сколько играем</label><div class="chips" id="dur"></div><div class="sub" id="fitHint" style="margin-top:6px"></div></div>
       <div style="flex:0 0 auto"><label>Кортов нужно</label>
         <div style="display:flex;align-items:center;gap:12px">
           <button class="step" onclick="stepN(-1)">−</button>
@@ -154,13 +155,12 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
     </div>
     <div>
       <label>Номер корта</label>
-      <div class="sub" id="courtsHint" style="margin-bottom:8px">Сначала тип: у крытых №1–8 и уличных №1–5 нумерация своя.</div>
+      <div class="sub" id="courtsHint" style="display:none"></div>
       <div class="chips" id="courts"></div>
     </div>
     <div>
       <label>Как бронировать</label>
       <div class="chips" id="mode"></div>
-      <div class="sub" style="margin-top:8px">«Сначала спросить» — бот пришлёт слот в Telegram и забронирует после вашего «Забрать».</div>
     </div>
   </div>
 
@@ -208,6 +208,25 @@ const stg={
   set:(k,v)=>{ try{localStorage.setItem(k,v);}catch(e){} if(TGA&&TGA.CloudStorage)TGA.CloudStorage.setItem(k,v,()=>{}); }
 };
 
+// --- тактильный отклик ---
+const HF=()=>TGA&&TGA.HapticFeedback;
+function buzz(kind){
+  const f=HF();
+  try{
+    if(f){
+      if(kind==='success')f.notificationOccurred('success');
+      else if(kind==='error')f.notificationOccurred('error');
+      else if(kind==='warning')f.notificationOccurred('warning');
+      else if(kind==='select')f.selectionChanged();
+      else f.impactOccurred(kind==='heavy'?'medium':'light');
+      return;
+    }
+  }catch(e){}
+  if(navigator.vibrate)navigator.vibrate(kind==='success'?[12,50,18]:kind==='error'?[30,60,30]:kind==='heavy'?18:8);
+}
+// любое нажатие в панели — лёгкий отклик
+document.addEventListener('pointerdown',e=>{if(e.target.closest('button'))buzz('light');},{passive:true});
+
 // --- тема ---
 function sysDark(){ return TGA?TGA.colorScheme==='dark':matchMedia('(prefers-color-scheme: dark)').matches; }
 function applyTheme(){
@@ -217,12 +236,12 @@ function applyTheme(){
   if(TGA){try{TGA.setHeaderColor(dark?'#0A0A0C':'#F2F2F7');TGA.setBackgroundColor(dark?'#0A0A0C':'#F2F2F7');}catch(e){}}
   document.querySelectorAll('#themeSeg button').forEach(b=>b.classList.toggle('on',b.dataset.th===THEME));
 }
-document.querySelectorAll('#themeSeg button').forEach(b=>b.onclick=()=>{THEME=b.dataset.th;stg.set('ab_theme',THEME);applyTheme();});
+document.querySelectorAll('#themeSeg button').forEach(b=>b.onclick=()=>{THEME=b.dataset.th;stg.set('ab_theme',THEME);applyTheme();buzz('select');});
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>THEME==='auto'&&applyTheme());
 if(TGA){TGA.ready();TGA.expand();TGA.onEvent('themeChanged',()=>THEME==='auto'&&applyTheme());}
 
 // --- демо-режим (когда бэкенда нет: локальный предпросмотр) ---
-const demo={stats:{checks:0,found:0,errors:0},bookings:[],log:[],profile:{name:'Азамат',phone:'+7 705 123 45 67',email:''},iv:null};
+const demo={stats:{checks:0,found:0,errors:0},bookings:[],offers:[],log:[],profile:{name:'Азамат',phone:'+7 705 123 45 67',email:''},iv:null};
 function dLog(m){demo.log.unshift({t:Date.now(),m});demo.log=demo.log.slice(0,40);}
 function enableDemo(){
   if(DEMO)return;DEMO=true;$('demoPill').style.display='';
@@ -231,11 +250,11 @@ function enableDemo(){
   demo.iv=setInterval(()=>{ if(!TASK.active)return;
     demo.stats.checks++;
     if(Math.random()<.55){dLog('Проверил расписание — свободного нет, слежу дальше');refresh();return;}
-    const pool=TASK.type==='outdoor'?[['Уличный корт №',5]]:TASK.type==='indoor'?[['Крытый корт №',8]]:[['Крытый корт №',8],['Уличный корт №',5]];
+    const pool=TASK.type==='outdoor'?[['Открытый корт №',5]]:TASK.type==='indoor'?[['Крытый корт №',8]]:[['Крытый корт №',8],['Открытый корт №',5]];
     const [pre,max]=pool[Math.floor(Math.random()*pool.length)];
     let n;do{n=1+Math.floor(Math.random()*max);}while(TASK.courts.length&&!TASK.courts.includes(n)&&TASK.type!=='any');
     const off=TASK.dayOffsets[Math.floor(Math.random()*TASK.dayOffsets.length)]||0;
-    const fh=parseInt(TASK.timeFrom),th=TASK.timeTo==='24:00'?24:parseInt(TASK.timeTo);
+    const fh=parseInt(TASK.timeFrom),th=parseInt(TASK.timeTo);
     const hs=[];for(let h=fh;h+TASK.dur/60<=th;h++)hs.push(h);
     if(!hs.length)return;
     const h=hs[Math.floor(Math.random()*hs.length)];
@@ -250,7 +269,7 @@ function enableDemo(){
       if(demo.bookings.filter(b=>!b.cancelled).length>=TASK.needed){TASK.active=false;dLog('🏁 Всё поймано — охота выключена');}
       refresh();};
     if(TASK.mode==='auto')book();
-    else{dLog('✋ Спросил в Telegram, жду «Забрать»…');setTimeout(()=>{if(TASK.active){dLog('👍 Вы нажали «Забрать» (демо)');book();}},7000);}
+    else{demo.offers.unshift({id:Math.random().toString(36).slice(2),title,start,price:3500*TASK.dur/60,book});dLog('✋ Жду решения: забрать или пропустить');}
     refresh();
   },5000);
 }
@@ -263,12 +282,15 @@ function demoApi(action,extra){
     case 'login':return {ok:extra.password==='MeiroDictador1995',token:'demo',error:'Пароль не подошёл'};
     case 'state':return a({task:{active:TASK.active,needed:TASK.needed},profile:demo.profile,stats:demo.stats,tg:1,
       bookings:demo.bookings.filter(b=>!b.cancelled).map(b=>({id:b.id,title:b.title,when:dWhen(b.start),start:b.start,price:b.price,online:b.start-5*36e5,phone:b.start-3*36e5,midnight:new Date(b.start).getHours()===0})),
+      offers:demo.offers.map(o=>({id:o.id,title:o.title,when:dWhen(o.start),price:o.price,start:o.start,midnight:new Date(o.start).getHours()===0})),
       log:demo.log.map(l=>({t:l.t,m:l.m}))});
     case 'save':if(extra.profile)Object.assign(demo.profile,extra.profile);return {ok:true};
     case 'start':TASK.active=true;dLog('🟢 Охота запущена — проверяю каждые ~15 сек');return {ok:true};
     case 'stop':TASK.active=false;dLog('⏹ Охота остановлена');return {ok:true};
     case 'cancelBooking':{const b=demo.bookings.find(x=>x.id===extra.id);if(b){b.cancelled=true;dLog('↩️ Отменил '+b.title+' — слот снова свободен');}return {ok:true};}
-    case 'probe':return {ok:true,probe:{altegio:true,courts:13,tg:true,tgLinked:1,kv:true}};
+    case 'takeOffer':{const o=demo.offers.find(x=>x.id===extra.id);if(o){o.book();demo.offers=demo.offers.filter(x=>x.id!==o.id);}return {ok:true};}
+    case 'skipOffer':demo.offers=demo.offers.filter(x=>x.id!==extra.id);dLog('✖️ Пропустил слот');return {ok:true};
+    case 'probe':return {ok:true,probe:{altegio:true,courts:13,matching:13,tg:true,tgLinked:1,kv:true}};
     case 'check':demo.stats.checks++;dLog('Проверил вручную — свободного нет');return {ok:true,result:{found:0}};
   }
   return {ok:false};
@@ -289,8 +311,8 @@ function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';cle
 
 async function login(){
   const r=await api('login',{password:$('pw').value});
-  if(r.ok){TOKEN=r.token;stg.set('ab_token',TOKEN);enter();}
-  else $('pwErr').style.display='block';
+  if(r.ok){buzz('success');TOKEN=r.token;stg.set('ab_token',TOKEN);enter();}
+  else {buzz('error');$('pwErr').style.display='block';}
 }
 $('pw').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
 function enter(){$('gate').style.display='none';document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');refresh();setInterval(refresh,8000);}
@@ -306,12 +328,18 @@ function markDirty(){
     const r=await api('save',collect());
     if(r.ok){$('saveMark').classList.add('show');setTimeout(()=>$('saveMark').classList.remove('show'),2200);}
   },500);}
-function mutate(fn){fn();renderTask();markDirty();}
+function fitWindow(){
+  const pad=n=>String(n).padStart(2,'0')+':00';
+  let f=Math.max(6,Math.min(24,parseInt(TASK.timeFrom))),to=Math.max(7,Math.min(25,parseInt(TASK.timeTo))),hh=Math.max(1,Math.round(TASK.dur/60));
+  if(to-f<hh){to=Math.min(25,f+hh);if(to-f<hh){f=Math.max(6,25-hh);to=25;}}
+  TASK.timeFrom=pad(f);TASK.timeTo=pad(to);
+}
+function mutate(fn){fn();fitWindow();renderTask();markDirty();}
 
 function chips(el,items,get,set){
   el.innerHTML='';
   items.forEach(([v,l])=>{const b=document.createElement('button');b.className='chip'+(get(v)?' on':'');b.textContent=l;
-    b.onclick=()=>mutate(()=>set(v));el.appendChild(b);});
+    b.onclick=()=>{buzz('select');mutate(()=>set(v));};el.appendChild(b);});
 }
 function dayLabel(off){
   const d=new Date(Date.now()+off*864e5);
@@ -323,7 +351,7 @@ function renderTask(){
     const nx=TASK.dayOffsets.includes(v)?TASK.dayOffsets.filter(x=>x!==v):[...TASK.dayOffsets,v].sort();
     if(nx.length)TASK.dayOffsets=nx;else toast('Хотя бы один день нужен');});
   chips($('dur'),[[60,'1 час'],[120,'2 часа'],[180,'3 часа']],v=>TASK.dur===v,v=>TASK.dur=v);
-  chips($('type'),[['any','Любой'],['indoor','Крытый'],['outdoor','Уличный']],v=>TASK.type===v,v=>{TASK.type=v;TASK.courts=[];});
+  chips($('type'),[['any','Любой'],['indoor','Крытый'],['outdoor','Открытый']],v=>TASK.type===v,v=>{TASK.type=v;TASK.courts=[];});
   if(TASK.type==='any'){$('courtsHint').style.display='';$('courts').innerHTML='';}
   else{$('courtsHint').style.display='none';
     const maxN=TASK.type==='indoor'?8:5;
@@ -332,9 +360,15 @@ function renderTask(){
       if(v===0)TASK.courts=[];
       else TASK.courts=TASK.courts.includes(v)?TASK.courts.filter(x=>x!==v):[...TASK.courts,v].sort();});}
   chips($('mode'),[['confirm','✋ Сначала спросить'],['auto','⚡ Бронить сразу']],v=>TASK.mode===v,v=>TASK.mode=v);
-  const opts=[];for(let h=6;h<=24;h++)opts.push(String(h).padStart(2,'0')+':00');
-  $('timeFrom').innerHTML=opts.slice(0,-1).map(o=>`<option ${o===TASK.timeFrom?'selected':''}>${o}</option>`).join('');
-  $('timeTo').innerHTML=opts.slice(1).map(o=>`<option ${o===TASK.timeTo?'selected':''}>${o==='24:00'?'24:00 · полночь':o}</option>`).join('');
+  const HV=n=>String(n).padStart(2,'0')+':00';
+  const HL=n=>n===24?'00:00 · полночь':n===25?'01:00 · ночью':HV(n);
+  let of='',ot='';
+  for(let x=6;x<=24;x++)of+=`<option value="${HV(x)}" ${HV(x)===TASK.timeFrom?'selected':''}>${HL(x)}</option>`;
+  for(let x=7;x<=25;x++)ot+=`<option value="${HV(x)}" ${HV(x)===TASK.timeTo?'selected':''}>${HL(x)}</option>`;
+  $('timeFrom').innerHTML=of;$('timeTo').innerHTML=ot;
+  const hh=Math.round(TASK.dur/60),tv=parseInt(TASK.timeTo);
+  const HLl=n=>n===24?'00:00':n===25?'01:00 ночи':String(n).padStart(2,'0')+':00';
+  $('fitHint').textContent=(tv>23?'🌙 ночь включена · ':'')+`старты с ${HLl(parseInt(TASK.timeFrom))} до ${HLl(tv)}`;
   const act=TASK.active;
   $('toggleBtn').textContent=act?'Остановить':'Начать охоту';
   $('toggleBtn').classList.toggle('stop',act);
@@ -342,9 +376,8 @@ function renderTask(){
   $('huntPill').className='pill'+(act?' live':'');
   $('statusCard').classList.toggle('live',act);
 }
-function stepN(d){mutate(()=>{TASK.needed=Math.max(1,Math.min(10,TASK.needed+d));});}
-$('timeFrom').addEventListener('change',()=>mutate(()=>{TASK.timeFrom=$('timeFrom').value;
-  if(parseInt(TASK.timeTo)<=parseInt(TASK.timeFrom)){const h=parseInt(TASK.timeFrom)+1;TASK.timeTo=h===24?'24:00':String(h).padStart(2,'0')+':00';}}));
+function stepN(d){buzz('select');mutate(()=>{TASK.needed=Math.max(1,Math.min(10,TASK.needed+d));});}
+$('timeFrom').addEventListener('change',()=>mutate(()=>{TASK.timeFrom=$('timeFrom').value;}));
 $('timeTo').addEventListener('change',()=>mutate(()=>{TASK.timeTo=$('timeTo').value;}));
 
 // --- телефон: +7 и не больше 10 цифр ---
@@ -369,12 +402,12 @@ $('pEmail').addEventListener('input',markDirty);
 function collect(){return {task:{...TASK},profile:{...PROF}};}
 function fillProfile(){$('pName').value=PROF.name||'';$('pPhone').value=PROF.phone||'';maskPhone();$('pEmail').value=PROF.email||'';}
 async function toggleHunt(){
-  if(TASK.active){await api('stop');TASK.active=false;renderTask();toast('Остановил. Продолжим, когда скажете');}
+  if(TASK.active){await api('stop');TASK.active=false;renderTask();buzz('warning');toast('Остановил. Продолжим, когда скажете');}
   else{
     await api('save',collect());
     const r=await api('start');
-    if(r.ok){TASK.active=true;renderTask();toast('Погнали! Проверяю каждые ~15 секунд 🎾');}
-    else toast(r.error||'Не получилось');
+    if(r.ok){TASK.active=true;renderTask();buzz('success');toast('Погнали! Проверяю каждые ~15 секунд 🎾');}
+    else {buzz('error');toast(r.error||'Не получилось');}
   }
   refresh();
 }
@@ -383,9 +416,11 @@ async function probe(){
   toast('Проверяю связь…');const r=await api('probe');
   if(!r.ok)return toast('Что-то не так с сервером');
   const p=r.probe;
-  toast(`Сайт кортов: ${p.altegio?'✅ кортов '+p.courts:'❌'} · Telegram: ${p.tg?(p.tgLinked?'✅':'⚠️ не подключён'):'❌'} · Память: ${p.kv?'✅':'❌'}`+(p.error?' · '+p.error:''));
+  toast(`Сайт кортов: ${p.altegio?'✅ кортов '+p.courts+(p.matching!==undefined?' (под фильтр '+p.matching+')':''):'❌'} · Telegram: ${p.tg?(p.tgLinked?'✅':'⚠️ не подключён'):'❌'} · Память: ${p.kv?'✅':'❌'}`+(p.error?' · '+p.error:''));
 }
-async function cancelBk(id){if(!confirm('Точно отменить бронь?'))return;const r=await api('cancelBooking',{id});toast(r.ok?'Отменил. Слот снова свободен':(r.error||'Не вышло'));refresh();}
+async function takeOffer(id){buzz('heavy');toast('Бронирую…');const r=await api('takeOffer',{id});buzz(r.ok?'success':'error');toast(r.ok?'Есть! Корт ваш 🎾':(r.error||'Не вышло'));refresh();}
+async function skipOffer(id){await api('skipOffer',{id});refresh();}
+async function cancelBk(id){if(!confirm('Точно отменить бронь?'))return;const r=await api('cancelBooking',{id});buzz(r.ok?'success':'error');toast(r.ok?'Отменил. Слот снова свободен':(r.error||'Не вышло'));refresh();}
 function left(ms){const d=ms-Date.now();if(d<=0)return null;const h=Math.floor(d/36e5),m=Math.floor(d%36e5/6e4);return h?`${h}ч ${String(m).padStart(2,'0')}м`:`${m} мин`;}
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -406,6 +441,23 @@ async function refresh(){
   $('statusSub').textContent=n>=need&&n>0?'все корты пойманы 🏁':'поймано кортов';
   $('pbar').style.width=Math.min(100,Math.round(n/Math.max(1,need)*100))+'%';
   $('stLine').textContent=`проверок ${r.stats.checks} · находок ${r.stats.found}`;
+  const offs=r.offers||[],ob=$('offers');
+  const sig=offs.map(o=>o.id).join(',');
+  if(sig&&sig!==window.__offSig){window.__offSig=sig;buzz('success');}
+  if(!sig)window.__offSig='';
+  ob.style.display=offs.length?'flex':'none';
+  ob.innerHTML=offs.map(o=>`<div class="card" style="background:linear-gradient(135deg,var(--lime1),var(--lime2));color:var(--ink);gap:10px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px">
+      <span style="font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap">🔔 свободный корт</span>
+      <span style="font-weight:800">${o.price?o.price+' ₸':''}</span>
+    </div>
+    <div style="font-size:22px;font-weight:800;letter-spacing:-.5px">${esc(o.title)}</div>
+    <div style="font-size:16px;font-weight:600">${esc(o.when)}${o.midnight?' 🌙 сегодня в полночь':''}</div>
+    <div class="row">
+      <button class="btn" style="background:var(--ink);color:#fff;font-weight:700" onclick="takeOffer('${o.id}')">🎾 Забрать</button>
+      <button class="btn" style="background:rgba(21,23,13,.12);color:var(--ink)" onclick="skipOffer('${o.id}')">Пропустить</button>
+    </div>
+  </div>`).join('');
   $('bookings').innerHTML=n?r.bookings.map(b=>{
     const lo=left(b.online),lp=left(b.phone);
     return `<div class="bk">
