@@ -121,7 +121,7 @@ function vFilters(s) {
     for (let n = 1; n <= maxN; n++) nums.push(btn(`${t.courts.includes(n) ? '✅' : ''}№${n}`, `Fc|${n}`));
     for (let i = 0; i < nums.length; i += 5) rows.push(nums.slice(i, i + 5));
   }
-  rows.push([btn(`${t.mode === 'confirm' ? '✅ ' : ''}✋ Спросить меня`, 'Fm|confirm'), btn(`${t.mode === 'auto' ? '✅ ' : ''}⚡ Брать сразу`, 'Fm|auto')]);
+  rows.push([btn(`${t.mode === 'confirm' ? '✅ ' : ''}Спросить меня`, 'Fm|confirm'), btn(`${t.mode === 'auto' ? '✅ ' : ''}Брать сразу`, 'Fm|auto')]);
   rows.push([btn('⬅️ В меню', 'V|main')]);
   const mode = t.mode === 'confirm'
     ? '✋ <b>Спросить меня</b> — пришлю слот с кнопкой «Забрать», бронь только после нажатия. Безопасно, но корт могут увести за эти секунды.'
@@ -308,7 +308,7 @@ async function onCallback(s, cb) {
       if (s.botOn === false) return tg.answerCb(cb.id, 'Бот выключен владельцем');
       if (!s.profile.name || !s.profile.phone) { await show('profile'); return tg.answerCb(cb.id, 'Сначала имя и телефон'); }
       if (hunt.activeBookings(s).length >= t.needed) { toast = 'Цель уже набрана — добавьте кортов'; view = 'when'; }
-      else { t.active = true; s.stats.startedAt = Date.now(); store.log(s, `Охота запущена из Telegram: нужно ${t.needed}, ${t.timeFrom}–${t.timeTo}`); toast = 'Погнали! 🟢'; view = 'main'; }
+      else { t.active = true; s.stats.startedAt = Date.now(); hunt.dropPhantoms(s); s.offers = []; s.seen = {}; store.log(s, `Охота запущена из Telegram: нужно ${t.needed}, ${t.timeFrom}–${t.timeTo}`); toast = 'Погнали! 🟢'; view = 'main'; }
     }
   }
   else if (op === 'Wd') {
@@ -329,15 +329,15 @@ async function onCallback(s, cb) {
     if (h - parseInt(t.timeFrom) < Math.round(t.dur / 60)) t.dur = 60;
     view = 'when';
   }
-  else if (op === 'Du') { t.dur = Number(a); L.fitWindow(t); view = 'when'; }
+  else if (op === 'Du') { t.dur = Number(a); L.fitWindow(t); hunt.pruneOffers(s); s.seen = {}; view = 'when'; }
   else if (op === 'N') { t.needed = Math.max(1, Math.min(10, t.needed + Number(a))); view = 'when'; }
-  else if (op === 'Ft') { t.type = a; t.courts = []; view = 'filters'; }
+  else if (op === 'Ft') { t.type = a; t.courts = []; hunt.pruneOffers(s); s.seen = {}; view = 'filters'; }
   else if (op === 'Fc') {
     const n = Number(a);
     t.courts = n === 0 ? [] : (t.courts.includes(n) ? t.courts.filter(x => x !== n) : [...t.courts, n].sort());
     view = 'filters';
   }
-  else if (op === 'Fm') { t.mode = a; view = 'filters'; }
+  else if (op === 'Fm') { t.mode = a; hunt.pruneOffers(s); view = 'filters'; }
   else if (op === 'P') {
     s.pending = { chat, field: a };
     const ask = a === 'phone' ? 'Пришлите номер: 705 123 45 67 (+7 добавлю сам)'

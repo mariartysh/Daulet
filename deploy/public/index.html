@@ -186,6 +186,7 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
     <div class="row">
       <button class="btn" onclick="checkNow()">Проверить сейчас</button>
       <button class="btn" onclick="probe()">Тест подключения</button>
+      <button class="btn" onclick="resetAll()">Очистить данные</button>
     </div>
   </div>
 
@@ -315,7 +316,12 @@ async function login(){
   else {buzz('error');$('pwErr').style.display='block';}
 }
 $('pw').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
-function enter(){$('gate').style.display='none';document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');refresh();setInterval(refresh,8000);}
+let pulseTimer=null;
+function startPulse(){
+  if(pulseTimer)return;
+  pulseTimer=setInterval(async()=>{ if(!TASK.active)return; try{await api('pulse');}catch(e){} refresh(); },15000);
+}
+function enter(){$('gate').style.display='none';document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');refresh();setInterval(refresh,8000);startPulse();}
 function toggleFold(id,foldId){const el=$(id),open=el.style.display!=='none';el.style.display=open?'none':'flex';$(foldId).classList.toggle('open',!open);}
 
 // --- автосохранение: локальный кэш + сервер, настройки не сбрасываются ---
@@ -359,7 +365,7 @@ function renderTask(){
     chips($('courts'),items,v=>v===0?TASK.courts.length===0:TASK.courts.includes(v),v=>{
       if(v===0)TASK.courts=[];
       else TASK.courts=TASK.courts.includes(v)?TASK.courts.filter(x=>x!==v):[...TASK.courts,v].sort();});}
-  chips($('mode'),[['confirm','✋ Сначала спросить'],['auto','⚡ Бронить сразу']],v=>TASK.mode===v,v=>TASK.mode=v);
+  chips($('mode'),[['confirm','Сначала спросить'],['auto','Бронить сразу']],v=>TASK.mode===v,v=>TASK.mode=v);
   const HV=n=>String(n).padStart(2,'0')+':00';
   const HL=n=>n===24?'00:00 · полночь':n===25?'01:00 · ночью':HV(n);
   let of='',ot='';
@@ -412,6 +418,11 @@ async function toggleHunt(){
   refresh();
 }
 async function checkNow(){toast('Смотрю расписание…');const r=await api('check');toast(r.ok?('Готово: новых слотов '+((r.result&&r.result.found)||0)):(r.error||'Не вышло'));refresh();}
+async function resetAll(){
+  if(!confirm('Удалить из бота все брони и найденные варианты? Настоящие брони на сайте останутся.'))return;
+  const r=await api('reset');buzz(r.ok?'success':'error');
+  toast(r.ok?'Очистил. Начинаем с чистого листа':'Не вышло');refresh();
+}
 async function probe(){
   toast('Проверяю связь…');const r=await api('probe');
   if(!r.ok)return toast('Что-то не так с сервером');
@@ -440,7 +451,9 @@ async function refresh(){
   $('bigN').innerHTML=`${n}<small> из ${need}</small>`;
   $('statusSub').textContent=n>=need&&n>0?'все корты пойманы 🏁':'поймано кортов';
   $('pbar').style.width=Math.min(100,Math.round(n/Math.max(1,need)*100))+'%';
-  $('stLine').textContent=`проверок ${r.stats.checks} · находок ${r.stats.found}`;
+  {const lt=r.lastTick||0,age=lt?Math.round((Date.now()-lt)/1000):null;
+   const tick=age===null?'автопроверки ещё не было':age<90?'автопроверка '+age+' с назад':age<3600?'автопроверка '+Math.round(age/60)+' мин назад':'автопроверка давно — проверьте пингер';
+   $('stLine').textContent=`проверок ${r.stats.checks} · находок ${r.stats.found} · ${tick}`;}
   const offs=r.offers||[],ob=$('offers');
   const sig=offs.map(o=>o.id).join(',');
   if(sig&&sig!==window.__offSig){window.__offSig=sig;buzz('success');}

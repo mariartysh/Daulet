@@ -98,4 +98,12 @@ function fitWindow(t) {
   return t;
 }
 
-module.exports = { fitWindow, MAX_H, hourVal, hourLabel, normTime, OFF, local, localISODate, hm, dm, wd, fmt, dayWord, cap, whenText, midnightNote, parseHM, dayStart, taskDates, slotMatches, deadlines, slotKey, parseCourt, courtOk };
+// ISO в часовом поясе салона: 2026-08-05T00:00:00+05:00
+function isoLocal(ms) {
+  const off = Number(process.env.TZ_OFFSET) || 5;
+  const d = new Date(ms + off * 3600e3);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:00+${p(off)}:00`;
+}
+
+module.exports = { fitWindow, MAX_H, hourVal, hourLabel, normTime, isoLocal, OFF, local, localISODate, hm, dm, wd, fmt, dayWord, cap, whenText, midnightNote, parseHM, dayStart, taskDates, slotMatches, deadlines, slotKey, parseCourt, courtOk };

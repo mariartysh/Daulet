@@ -36,6 +36,7 @@ module.exports = async (req, res) => {
           task: s.task, profile: s.profile, stats: s.stats,
           tg: (s.chats || []).length,
           botOn: s.botOn !== false,
+          lastTick: s.lastTick || 0,
           bookings: act.map(b => {
             const d = L.deadlines(b.start);
             return { id: b.id, title: hunt.courtTitle(b, b.name), when: L.whenText(b.start, b.dur), start: b.start,
@@ -58,7 +59,9 @@ module.exports = async (req, res) => {
           if (![60, 120, 180].includes(t.dur)) t.dur = 60;
           if (t.type === 'any') t.courts = [];
           L.fitWindow(t);
+          const fchg = JSON.stringify({ ...s.task, active: 0 }) !== JSON.stringify({ ...t, active: 0 });
           s.task = t;
+          if (fchg) { hunt.pruneOffers(s); s.seen = {}; }
         }
         if (body.profile) {
           s.profile.name = String(body.profile.name || '').slice(0, 60);
@@ -79,8 +82,11 @@ module.exports = async (req, res) => {
         if (hunt.activeBookings(s).length >= s.task.needed) return res.status(200).json({ ok: false, error: 'Цель уже набрана — увеличьте «сколько кортов»' });
         s.task.active = true;
         s.stats.startedAt = Date.now();
+        hunt.dropPhantoms(s);
+        s.offers = []; s.seen = {};
         store.log(s, `Охота запущена: нужно ${s.task.needed}, ${s.task.timeFrom}–${s.task.timeTo}`);
         await hunt.sendAll(s, '🟢 <b>Охота запущена</b> — из панели.\n\n' + hunt.statusText(s));
+        await hunt.sweep(s).catch(e => store.log(s, 'Первый проход не удался: ' + e.message, 1));
         await store.save(s);
         return res.status(200).json({ ok: true });
       }
@@ -97,6 +103,22 @@ module.exports = async (req, res) => {
         if (r.ok) await hunt.sendAll(s, `↩️ <b>Бронь отменена</b> — из панели.\n${hunt.courtTitle(r.b, r.b.name)} · ${L.whenText(r.b.start, r.b.dur)}\nСлот снова свободен на сайте.`);
         await store.save(s);
         return res.status(200).json(r.ok ? { ok: true } : { ok: false, error: r.why });
+      }
+      case 'pulse': {
+        if (s.botOn === false || !s.task.active) return res.status(200).json({ ok: true, idle: true });
+        if (Date.now() - (s.lastPulse || 0) < 9000) return res.status(200).json({ ok: true, skipped: true });
+        s.lastPulse = Date.now(); s.lastTick = Date.now();
+        const r = await hunt.sweep(s);
+        await store.save(s);
+        return res.status(200).json({ ok: true, result: r });
+      }
+      case 'reset': {
+        s.bookings = []; s.offers = []; s.seen = {}; s.reminded = {};
+        s.targets = null; s.svcCache = null; s.task.active = false;
+        s.stats = { checks: 0, found: 0, booked: 0, errors: 0, startedAt: 0 };
+        store.log(s, 'Данные о бронях и вариантах очищены');
+        await store.save(s);
+        return res.status(200).json({ ok: true });
       }
       case 'takeOffer': {
         const r = await hunt.takeOffer(s, body.id);

@@ -10,11 +10,13 @@ const L = require('./logic');
 const { log } = require('./store');
 
 const CACHE_TTL = 3 * 3600e3;
+const CACHE_VER = 9;   // ↑ при изменении логики разбора кортов — сбрасывает старый кэш
 const COMBO_CAP = Number(process.env.COMBO_CAP || 10);
 
 // ---------- обнаружение кортов ----------
 async function ensureTargets(s) {
-  if (s.targets && Date.now() - s.targets.ts < CACHE_TTL && s.apiBase) return s.targets.list;
+  if (s.targets && s.targets.v === CACHE_VER && Date.now() - s.targets.ts < CACHE_TTL && s.apiBase) return s.targets.list;
+  s.svcCache = null;   // услуги перечитываем вместе с кортами
 
   let staffRaw = null, lastErr = '';
   const bases = s.apiBase ? [s.apiBase, ...alt.BASES.filter(b => b !== s.apiBase)] : alt.BASES;
@@ -31,19 +33,18 @@ async function ensureTargets(s) {
   const list = [];
   for (const x of staffRaw) {
     const name = String(x.name || '');
-    if (/стенк|стена|wall/i.test(name)) continue;              // тренировочная стенка — не корт
+    if (/стенк|стена|wall|пляж|песк|beach/i.test(name)) continue;   // стенки и пляжный теннис — не наши корты
     const id = Number(x.id);
     const services = await servicesFor(s, id);
-    if (!services.length) continue;                            // без услуг забронировать нельзя
-    const num = L.parseCourt(name).court;
-    // тип берём из услуг корта; если обе — считаем «неизвестно»
+    if (!services.length) continue;                                 // без услуги забронировать нельзя
     const hasIn = services.some(v => /крыт/i.test(v.title));
     const hasOut = services.some(v => /откр|улич/i.test(v.title));
-    const indoor = hasIn && !hasOut ? true : hasOut && !hasIn ? false : L.parseCourt(name).indoor;
-    list.push({ staffId: id, court: num, indoor, name, services });
+    // тип из услуги; если не ясно — «Корт №N» (с решёткой) у Даулета открытый, «Корт N» крытый
+    const indoor = hasIn && !hasOut ? true : hasOut && !hasIn ? false : !/№/.test(name);
+    list.push({ staffId: id, court: L.parseCourt(name).court, indoor, name, services });
   }
   if (!list.length) throw new Error('сайт ответил, но кортов с услугами нет — проверьте COMPANY_ID и ключ');
-  s.targets = { ts: Date.now(), list };
+  s.targets = { ts: Date.now(), v: CACHE_VER, list };
   const inC = list.filter(x => x.indoor === true).length, outC = list.filter(x => x.indoor === false).length;
   log(s, `Кортов на сайте: ${list.length} (крытых ${inC}, открытых ${outC})`);
   return list;
@@ -64,13 +65,13 @@ async function servicesFor(s, staffId) {
   return list;
 }
 
-// В Даулете услуга одна на корт (часовая аренда) — берём её
-const pickService = (services, durMin) => {
+// Часовая аренда: одна услуга на корт. Обязательно та, что совпадает с типом корта.
+const pickService = (services, durMin, indoor) => {
   if (!services || !services.length) return null;
-  const hrs = Math.max(1, Math.round((durMin || 60) / 60));
-  return services.find(x => x.len === durMin)
-    || services.find(x => new RegExp(`${hrs}\\s*(час|ч\\b)`, 'i').test(x.title))
-    || services[0];
+  const byType = indoor === true ? services.filter(x => /крыт/i.test(x.title))
+    : indoor === false ? services.filter(x => /откр|улич/i.test(x.title)) : services;
+  const pool = byType.length ? byType : services;
+  return pool.find(x => x.len === 60) || pool[0];
 };
 
 const activeBookings = s => s.bookings.filter(b => !b.cancelled && b.start > Date.now() - 3600e3);
@@ -115,20 +116,20 @@ async function sweep(s) {
   const foundNew = [];
   let apiOk = 0, apiFail = 0;
   for (const { d, c } of batch) {
-    const svc = pickService(c.services, t.dur);
+    const svc = pickService(c.services, t.dur, c.indoor);
     const j = await alt.getTimes(c.staffId, d.iso, svc && svc.id, s.apiBase);
     if (!j.success || !Array.isArray(j.data)) { apiFail++; continue; }
     apiOk++;
 
     // все свободные старты этого дня, в мс
     const tzo = `+0${Number(process.env.TZ_OFFSET) || 5}:00`;
-    const free = [];
+    const raw = new Map();
     for (const slot of j.data) {
       const hm = L.normTime(slot.time);
       const ms = slot.datetime ? Date.parse(slot.datetime) : (hm ? Date.parse(`${d.iso}T${hm}:00${tzo}`) : NaN);
-      if (ms) free.push(ms);
+      if (ms) raw.set(ms, slot.datetime || null);
     }
-    free.sort((a, b) => a - b);
+    const free = [...raw.keys()].sort((a, b) => a - b);
     const freeSet = new Set(free);
 
     for (const startMs of free) {
@@ -142,7 +143,7 @@ async function sweep(s) {
       if (s.bookings.some(b => !b.cancelled && b.staffId === c.staffId && b.start === startMs)) continue;
       s.seen[key] = Date.now();
       s.stats.found++;
-      foundNew.push({ target: c, svc, startMs, key });
+      foundNew.push({ target: c, svc, startMs, key, raw: raw.get(startMs) || null });
     }
   }
   if (!apiOk && apiFail) { s.stats.errors++; log(s, `Расписание не отдалось ни по одному корту (${apiFail} попыток) — вероятно, устарел ключ`, 1); }
@@ -150,7 +151,7 @@ async function sweep(s) {
   let asked = 0;
   for (const f of foundNew) {
     if (remaining() <= 0) break;
-    if (t.mode === 'auto') await doBook(s, f.target.staffId, f.svc && f.svc.id, f.startMs);
+    if (t.mode === 'auto') await doBook(s, f.target.staffId, f.svc && f.svc.id, f.startMs, f.raw);
     else if (asked < 3) { await offerSlot(s, f); asked++; }
   }
   if (!foundNew.length) log(s, `Проверка №${s.stats.checks}: свободного нет, слежу дальше`);
@@ -165,7 +166,7 @@ async function offerSlot(s, f) {
   const hrs = Math.max(1, Math.round(s.task.dur / 60));
   const o = {
     id: Math.random().toString(36).slice(2, 9),
-    staffId: c.staffId, serviceId: f.svc ? f.svc.id : null,
+    staffId: c.staffId, serviceId: f.svc ? f.svc.id : null, raw: f.raw || null,
     court: c.court, indoor: c.indoor, name: c.name,
     start: f.startMs, dur: s.task.dur,
     price: f.svc && f.svc.price ? f.svc.price * hrs : null
@@ -187,18 +188,20 @@ const findOffer = (s, id) => (s.offers || []).find(o => o.id === id);
 function dropOffer(s, id) { s.offers = (s.offers || []).filter(o => o.id !== id); }
 
 // ---------- бронирование (несколько часов = несколько записей) ----------
-async function doBook(s, staffId, serviceId, startMs) {
+async function doBook(s, staffId, serviceId, startMs, rawDatetime) {
   const t = s.task;
   const targets = (s.targets && s.targets.list) || [];
   const target = targets.find(x => x.staffId === Number(staffId)) || { staffId, name: '', court: null, indoor: null, services: [] };
-  const svc = (target.services || []).find(x => x.id === Number(serviceId)) || pickService(target.services, t.dur);
+  const svc = (target.services || []).find(x => x.id === Number(serviceId))
+    || pickService(target.services, t.dur, target.indoor);
   const title = courtTitle(target, target.name);
   const hours = Math.max(1, Math.round(t.dur / 60));
   const parts = [];
 
   for (let k = 0; k < hours; k++) {
     const ms = startMs + k * 3600e3;
-    const iso = new Date(ms).toISOString().replace(/\.\d+Z/, '+00:00');
+    // Altegio ждёт время салона (+05:00), не UTC. Для первого часа берём строку прямо из расписания.
+    const iso = (k === 0 && rawDatetime) ? rawDatetime : L.isoLocal(ms);
     const j = await alt.book({
       phone: s.profile.phone, fullname: s.profile.name, email: s.profile.email,
       staffId: Number(staffId), serviceId: svc ? svc.id : null, datetime: iso,
@@ -206,17 +209,29 @@ async function doBook(s, staffId, serviceId, startMs) {
     }, s.apiBase);
     if (!j.success) {
       const code = (j.meta && j.meta.code) || (Array.isArray(j.errors) && j.errors[0] && j.errors[0].code);
-      const taken = j._status === 422 && (code === 433 || code === 437);
-      if (!taken) s.stats.errors++;
-      const why = taken ? 'слот увели' : JSON.stringify(j.meta || j.data || j.raw || '').slice(0, 160);
+      const msg = String((j.meta && j.meta.message) || (j.data && j.data.message) || j.raw || '');
+      const busy = j._status === 422 && (code === 433 || code === 437)
+        || /not available at the selected time|уже занят|недоступ/i.test(msg);
+      const taken = busy;
+      if (!busy) s.stats.errors++;
+      else s.seen[L.slotKey(staffId, ms)] = Date.now();
+      const why = busy ? 'этот час уже заняли' : (msg || JSON.stringify(j.meta || j.data || '')).slice(0, 160);
       // если первый час уже сорвался — просто идём дальше; если сорвался второй — откатываем первый
       for (const p of parts) await alt.cancel(p.recordId, p.hash, s.apiBase).catch(() => {});
       log(s, `Бронь не прошла (${title}, ${L.whenText(startMs, t.dur)}): ${why}`, taken ? 0 : 1);
       if (!taken) await notifyError(s, `Бронь не прошла: ${title}, ${L.whenText(startMs, t.dur)}\n${why}`);
-      return { ok: false, why: taken ? 'Не успели — слот уже заняли' : why };
+      return { ok: false, why: busy ? 'Не успели — этот час уже заняли' : why };
     }
     const rec = (Array.isArray(j.data) && j.data[0]) || j.data || {};
-    parts.push({ recordId: rec.record_id || rec.id || null, hash: rec.record_hash || rec.hash || null, start: ms });
+    const recordId = rec.record_id || rec.id || null;
+    const hash = rec.record_hash || rec.hash || null;
+    if (!recordId) {   // «успех» без номера записи — брони нет, фантом не создаём
+      for (const p of parts) await alt.cancel(p.recordId, p.hash, s.apiBase).catch(() => {});
+      s.stats.errors++;
+      log(s, 'Сайт не вернул номер записи (' + title + ', ' + L.whenText(startMs, t.dur) + ') — брони нет', 1);
+      return { ok: false, why: 'Сайт не подтвердил запись — попробуйте ещё раз' };
+    }
+    parts.push({ recordId, hash, start: ms });
   }
 
   const b = {
@@ -250,8 +265,8 @@ async function takeOffer(s, id) {
   if (!o) return { ok: false, why: 'Это предложение уже неактуально' };
   if (Date.now() > o.start - 10 * 60e3) { dropOffer(s, id); return { ok: false, why: 'Слот уже в прошлом' }; }
   if (activeBookings(s).length >= s.task.needed) return { ok: false, why: 'Цель уже набрана' };
-  const r = await doBook(s, o.staffId, o.serviceId, o.start);
-  if (r.ok) dropOffer(s, id);
+  const r = await doBook(s, o.staffId, o.serviceId, o.start, o.raw);
+  if (r.ok || /заняли|увели/i.test(r.why || '')) dropOffer(s, id);
   return r;
 }
 
@@ -330,4 +345,29 @@ function statusText(s) {
   return out;
 }
 
-module.exports = { sweep, doBook, doCancel, reminders, statusText, activeBookings, ensureTargets, courtTitle, sendAll, takeOffer, findOffer, dropOffer, pickService };
+// Предложения вне текущего фильтра — убрать
+function pruneOffers(s) {
+  const t = s.task, now = Date.now();
+  const dates = L.taskDates(t, now);
+  const before = (s.offers || []).length;
+  s.offers = (s.offers || []).filter(o => {
+    if (o.start < now + 10 * 60e3) return false;
+    if (!L.courtOk(t, o)) return false;
+    if (o.dur !== t.dur) return false;
+    const entry = dates.find(d => d.iso === L.localISODate(o.start));
+    return entry ? L.slotMatches(t, entry, o.start, now) : false;
+  });
+  const dropped = before - s.offers.length;
+  if (dropped) log(s, 'Убрал вариантов вне фильтра: ' + dropped);
+  return dropped;
+}
+
+// Фантомы: «брони», которые сайт не подтверждал
+function dropPhantoms(s) {
+  const bad = s.bookings.filter(b => !b.cancelled && !b.recordId && !(b.parts && b.parts.some(p => p.recordId)));
+  for (const b of bad) b.cancelled = true;
+  if (bad.length) log(s, 'Убрал несуществующих броней: ' + bad.length, 1);
+  return bad.length;
+}
+
+module.exports = { pruneOffers, dropPhantoms, sweep, doBook, doCancel, reminders, statusText, activeBookings, ensureTargets, courtTitle, sendAll, takeOffer, findOffer, dropOffer, pickService };
