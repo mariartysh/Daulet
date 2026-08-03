@@ -368,7 +368,7 @@ function renderTask(){
   $('timeFrom').innerHTML=of;$('timeTo').innerHTML=ot;
   const hh=Math.round(TASK.dur/60),tv=parseInt(TASK.timeTo);
   const HLl=n=>n===24?'00:00':n===25?'01:00 ночи':String(n).padStart(2,'0')+':00';
-  $('fitHint').textContent=(tv>23?'🌙 ночь включена · ':'')+`старты с ${HLl(parseInt(TASK.timeFrom))} до ${HLl(tv)}`;
+  $('fitHint').textContent=(tv>23?'🌙 ночь включена · ':'')+`ищу старт с ${HLl(parseInt(TASK.timeFrom))} до ${HLl(tv)}`+(hh>1?` · нужно ${hh} ч подряд`:'');
   const act=TASK.active;
   $('toggleBtn').textContent=act?'Остановить':'Начать охоту';
   $('toggleBtn').classList.toggle('stop',act);

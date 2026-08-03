@@ -45,8 +45,8 @@ module.exports = async (req, res) => {
   // 3. Как бот видит корты после разбора названий
   try {
     const targets = await hunt.ensureTargets(s);
-    out.корты_как_видит_бот = targets.slice(0, 20).map(t =>
-      `${hunt.courtTitle(t, t.name)} · staff ${t.staffId} · услуг ${(t.services || []).length}`);
+    out.корты_как_видит_бот = targets.map(t =>
+      `${hunt.courtTitle(t, t.name)} ← "${t.name}" · ${t.indoor === true ? 'крытый' : t.indoor === false ? 'открытый' : 'тип неизвестен'} · staff ${t.staffId} · ${(t.services || []).map(v => v.title + ' / ' + (v.price || '?') + '₸').join(', ')}`);
     out.всего_кортов = targets.length;
     out.подходит_под_фильтр = targets.filter(t => L.courtOk(s.task, t)).length;
 
@@ -58,12 +58,16 @@ module.exports = async (req, res) => {
       const sv = hunt.pickService(t.services, s.task.dur);
       const d = dates[0] ? dates[0].iso : L.localISODate(Date.now());
       const j = await alt.getTimes(t.staffId, d, sv && sv.id, s.apiBase);
-      const times = Array.isArray(j.data) ? j.data.map(x => (x.time || '').slice(0, 5) || x.datetime) : [];
+      const times = Array.isArray(j.data) ? j.data.map(x => L.normTime(x.time) || x.datetime) : [];
       out.расписание.push({
         корт: hunt.courtTitle(t, t.name), дата: d,
         услуга: sv ? `${sv.title} (id ${sv.id})` : 'нет',
         статус: j._status, success: !!j.success,
         свободных_слотов: times.length, слоты: times.slice(0, 24),
+        подходят_под_окно: times.filter(x => {
+          const ms = Date.parse(`${d}T${x}:00+0${Number(process.env.TZ_OFFSET) || 5}:00`);
+          return ms && L.slotMatches(s.task, dates.find(e => e.iso === d) || { carry: 0 }, ms, Date.now());
+        }),
         ответ: j.success ? undefined : String(JSON.stringify(j.meta || j.raw || '')).slice(0, 200)
       });
     }
@@ -71,7 +75,7 @@ module.exports = async (req, res) => {
     out.ошибка_разбора = e.message;
   }
 
-  out.подсказка = 'Если сотрудников 0 и статус 401/403 — устарел ALTEGIO_AUTH. Если слоты есть, а бот молчит — сузьте время/дни в задании или посмотрите «подходит_под_фильтр».';
+  out.подсказка = 'Смотрите «подходят_под_окно»: если слоты есть, а тут пусто — расширьте окно старта или добавьте дни. Для 2–3 часов нужны подряд идущие свободные часы.';
   await store.save(s);
   return res.status(200).json(out);
 };

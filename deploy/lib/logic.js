@@ -27,6 +27,10 @@ function midnightNote(ms) {
   return `\n🌙 Это ночь ${dayWord(ms - 86400e3)}→${dayWord(ms)}: играете ${dayWord(ms - 86400e3)} после полуночи (сайт пишет «${dayWord(ms)} ${t}»)`;
 }
 
+const normTime = s => {
+  const m = String(s || '').match(/(\d{1,2}):(\d{2})/);
+  return m ? `${String(m[1]).padStart(2, '0')}:${m[2]}` : null;
+};
 const parseHM = s => { const [h, m] = String(s).split(':').map(Number); return h * 60 + (m || 0); };
 const MAX_H = 25;                                  // до 01:00 ночи — дальше корты закрыты
 const hourVal = h => `${String(h).padStart(2, '0')}:00`;   // 24:00 / 25:00 — «ночные» значения
@@ -58,7 +62,7 @@ function slotMatches(task, dateEntry, startMs, nowMs) {
   const mins = parseHM(hm(startMs)) + (dateEntry.carry ? 1440 : 0);
   const fromM = parseHM(task.timeFrom || '20:00');
   const toM = parseHM(task.timeTo || '22:00');
-  return mins >= fromM && mins + (task.dur || 60) <= toM;
+  return mins >= fromM && mins <= toM;                  // окно = когда можно НАЧАТЬ
 }
 
 // Дедлайны отмены: онлайн −5ч, ресепшн −3ч
@@ -87,16 +91,11 @@ function courtOk(task, meta) {
 // Окно времени должно вмещать длительность, иначе искать нечего.
 // Мягко расширяем конец, при необходимости сдвигаем начало.
 function fitWindow(t) {
-  let f = Math.max(6, Math.min(24, parseInt(t.timeFrom || '20:00')));
-  let to = Math.max(7, Math.min(MAX_H, parseInt(t.timeTo || '22:00')));
-  const h = Math.max(1, Math.round((t.dur || 60) / 60));
-  if (to - f < h) {
-    to = Math.min(MAX_H, f + h);
-    if (to - f < h) { f = Math.max(6, MAX_H - h); to = MAX_H; }
-  }
+  const f = Math.max(6, Math.min(24, parseInt(t.timeFrom || '20:00')));
+  const to = Math.max(f, Math.min(MAX_H, parseInt(t.timeTo || '22:00')));
   t.timeFrom = hourVal(f);
   t.timeTo = hourVal(to);
   return t;
 }
 
-module.exports = { fitWindow, MAX_H, hourVal, hourLabel, OFF, local, localISODate, hm, dm, wd, fmt, dayWord, cap, whenText, midnightNote, parseHM, dayStart, taskDates, slotMatches, deadlines, slotKey, parseCourt, courtOk };
+module.exports = { fitWindow, MAX_H, hourVal, hourLabel, normTime, OFF, local, localISODate, hm, dm, wd, fmt, dayWord, cap, whenText, midnightNote, parseHM, dayStart, taskDates, slotMatches, deadlines, slotKey, parseCourt, courtOk };
