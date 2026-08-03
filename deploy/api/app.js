@@ -1,0 +1,113 @@
+// API панели: логин, состояние, автосохранение, старт/стоп, проверка, отмена.
+const crypto = require('crypto');
+const store = require('../lib/store');
+const hunt = require('../lib/hunt');
+const L = require('../lib/logic');
+
+const token = pw => crypto.createHash('sha256').update(pw + '|' + (process.env.TICK_KEY || 'salt')).digest('hex');
+
+function normPhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.startsWith('8')) d = '7' + d.slice(1);
+  if (d && !d.startsWith('7')) d = '7' + d;
+  d = d.slice(0, 11);
+  return d.length === 11 ? '+' + d : '';
+}
+
+module.exports = async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.method !== 'POST') return res.status(405).json({ ok: false });
+  const body = req.body || {};
+  const s = await store.load();
+  const authed = req.headers['x-auth'] && req.headers['x-auth'] === token(s.password);
+
+  if (body.action === 'login') {
+    if (body.password === s.password) return res.status(200).json({ ok: true, token: token(s.password) });
+    return res.status(401).json({ ok: false, error: 'Пароль не подошёл' });
+  }
+  if (!authed) return res.status(401).json({ ok: false, error: 'auth' });
+
+  try {
+    switch (body.action) {
+      case 'state': {
+        const act = hunt.activeBookings(s).sort((a, b) => a.start - b.start);
+        return res.status(200).json({
+          ok: true,
+          task: s.task, profile: s.profile, stats: s.stats,
+          tg: (s.chats || []).length,
+          bookings: act.map(b => {
+            const d = L.deadlines(b.start);
+            return { id: b.id, title: hunt.courtTitle(b, b.name), when: L.whenText(b.start, b.dur), start: b.start,
+              price: b.price, online: d.online, phone: d.phone,
+              midnight: L.hm(b.start) === '00:00' };
+          }),
+          log: s.log.slice(0, 60)
+        });
+      }
+      case 'save': {
+        if (body.task) {
+          const t = { ...s.task, ...body.task };
+          t.active = s.task.active; // запуск только явной командой
+          t.needed = Math.max(1, Math.min(10, Number(t.needed) || 1));
+          t.dayOffsets = (t.dayOffsets || [0]).filter(o => [0, 1, 2].includes(o));
+          if (!t.dayOffsets.length) t.dayOffsets = [0];
+          if (!['any', 'indoor', 'outdoor'].includes(t.type)) t.type = 'any';
+          if (![60, 120, 180].includes(t.dur)) t.dur = 60;
+          if (t.type === 'any') t.courts = [];
+          s.task = t;
+        }
+        if (body.profile) {
+          s.profile.name = String(body.profile.name || '').slice(0, 60);
+          s.profile.phone = normPhone(body.profile.phone) || String(body.profile.phone || '').slice(0, 20);
+          s.profile.email = String(body.profile.email || '').slice(0, 80);
+        }
+        await store.save(s);
+        return res.status(200).json({ ok: true });
+      }
+      case 'start': {
+        if (!s.profile.phone || !s.profile.name) return res.status(200).json({ ok: false, error: 'Сначала имя и телефон — на кого бронировать?' });
+        if (hunt.activeBookings(s).length >= s.task.needed) return res.status(200).json({ ok: false, error: 'Цель уже набрана — увеличьте «сколько кортов»' });
+        s.task.active = true;
+        s.stats.startedAt = Date.now();
+        store.log(s, `Охота запущена: нужно ${s.task.needed}, ${s.task.timeFrom}–${s.task.timeTo}`);
+        await hunt.sendAll(s, '🟢 Охота запущена из панели.\n' + hunt.statusText(s));
+        await store.save(s);
+        return res.status(200).json({ ok: true });
+      }
+      case 'stop': {
+        s.task.active = false;
+        store.log(s, 'Охота остановлена из панели');
+        await store.save(s);
+        return res.status(200).json({ ok: true });
+      }
+      case 'cancelBooking': {
+        const r = await hunt.doCancel(s, body.id);
+        if (r.ok) await hunt.sendAll(s, `↩️ Бронь отменена из панели: ${hunt.courtTitle(r.b, r.b.name)} · ${L.whenText(r.b.start, r.b.dur)}`);
+        await store.save(s);
+        return res.status(200).json(r.ok ? { ok: true } : { ok: false, error: r.why });
+      }
+      case 'probe': {
+        const out = { tg: !!process.env.TELEGRAM_TOKEN, tgLinked: (s.chats || []).length, kv: !!process.env.UPSTASH_REDIS_REST_URL };
+        try {
+          const list = await hunt.ensureStaff(s);
+          out.altegio = true;
+          out.courts = list.length;
+        } catch (e) { out.altegio = false; out.error = e.message; }
+        await store.save(s);
+        return res.status(200).json({ ok: true, probe: out });
+      }
+      case 'check': {
+        if (!s.task.active) return res.status(200).json({ ok: false, error: 'Охота на паузе — сначала запустите' });
+        const r = await hunt.sweep(s);
+        await store.save(s);
+        return res.status(200).json({ ok: true, result: r });
+      }
+      default:
+        return res.status(400).json({ ok: false, error: 'unknown action' });
+    }
+  } catch (e) {
+    store.log(s, 'Сбой панели: ' + e.message, 1);
+    await store.save(s);
+    return res.status(500).json({ ok: false, error: e.message });
+  }
+};

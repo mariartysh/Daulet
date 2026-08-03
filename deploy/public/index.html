@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#F2F2F7">
+<title>Court Hunter · Daulet Tennis</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{
+  --bg:#F2F2F7;--card:#FFFFFF;--fill:#EFEFF3;--text:#111114;--sub:#7A7A83;--line:rgba(0,0,0,.06);
+  --lime1:#DDFF57;--lime2:#A6E812;--ink:#15170D;--pink:#FF375F;--purple:#7A5CFF;
+  --r:22px;--ri:14px;
+}
+[data-theme="dark"]{
+  --bg:#0A0A0C;--card:#17171A;--fill:#242428;--text:#F5F5F7;--sub:#8E8E96;--line:rgba(255,255,255,.08);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0}
+body{background:var(--bg);color:var(--text);font:16px/1.45 -apple-system,"SF Pro Text",system-ui,"Segoe UI",Roboto,sans-serif;
+  transition:background .25s,color .25s;padding-bottom:env(safe-area-inset-bottom)}
+a{color:inherit}
+.wrap{max-width:640px;margin:0 auto;padding:14px 14px 60px;display:flex;flex-direction:column;gap:12px}
+.card{background:var(--card);border-radius:var(--r);padding:20px;display:flex;flex-direction:column;gap:14px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+h1{font-size:32px;font-weight:800;letter-spacing:-.8px;margin:0;line-height:1.1}
+h2{font-size:20px;font-weight:700;letter-spacing:-.4px;margin:0}
+label{font-size:14px;font-weight:600;color:var(--sub);display:block;margin-bottom:8px}
+.sub{color:var(--sub);font-size:13px;line-height:1.55}
+button{font:inherit;cursor:pointer;border:none;transition:transform .12s ease,filter .15s,background .15s,color .15s}
+button:active{transform:scale(.96)}
+.input,select{background:var(--fill);border:none;border-radius:var(--ri);color:var(--text);padding:14px 16px;font:inherit;font-size:16px;width:100%;color-scheme:light dark;-webkit-appearance:none;appearance:none}
+.input:focus-visible,select:focus-visible,button:focus-visible{outline:3px solid var(--lime2);outline-offset:1px}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),linear-gradient(135deg,var(--sub) 50%,transparent 50%);
+  background-position:calc(100% - 20px) 55%,calc(100% - 14px) 55%;background-size:6px 6px;background-repeat:no-repeat;padding-right:38px}
+.cta{background:linear-gradient(135deg,var(--lime1),var(--lime2));color:var(--ink);border-radius:18px;min-height:58px;
+  font-size:18px;font-weight:800;letter-spacing:-.3px;width:100%;box-shadow:0 6px 22px rgba(166,232,18,.35)}
+.cta.stop{background:linear-gradient(135deg,#FF2D55,#FF6A00);color:#fff;box-shadow:0 6px 26px rgba(255,45,85,.55)}
+.btn{background:var(--fill);color:var(--text);border-radius:var(--ri);padding:12px 18px;font-size:15px;font-weight:600;min-height:48px}
+.btn.danger{color:var(--pink)}
+.chip{padding:11px 16px;border-radius:100px;background:var(--fill);color:var(--text);font-size:15px;font-weight:600;min-height:44px}
+.chip.on{background:var(--text);color:var(--card)}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+.row>*{flex:1;min-width:120px}
+.seg{display:flex;background:var(--fill);border-radius:100px;padding:3px;gap:2px}
+.seg button{flex:1;border-radius:100px;padding:7px 12px;font-size:13px;font-weight:600;color:var(--sub);background:transparent;min-height:32px}
+.seg button.on{background:var(--card);color:var(--text);box-shadow:0 1px 4px rgba(0,0,0,.12)}
+.step{width:52px;height:52px;border-radius:16px;background:var(--fill);color:var(--text);font-size:24px;font-weight:600}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:100px;font-size:12.5px;font-weight:700;background:var(--fill);color:var(--sub)}
+.pill.live{background:linear-gradient(135deg,var(--lime1),var(--lime2));color:var(--ink);animation:pul 1.8s infinite}
+@keyframes pul{50%{filter:brightness(.85)}}
+.status{position:relative;overflow:hidden}
+.status.live{background:
+  radial-gradient(130% 170% at 10% -10%,rgba(221,255,87,.95),transparent 58%),
+  radial-gradient(120% 150% at 105% 10%,rgba(122,92,255,.85),transparent 60%),
+  radial-gradient(140% 160% at 70% 115%,rgba(255,55,95,.8),transparent 62%),
+  radial-gradient(90% 120% at 40% 60%,rgba(0,209,255,.45),transparent 65%),var(--card);
+  background-size:200% 200%;animation:aurora 9s ease-in-out infinite}
+.status.live .bignum,.status.live #statusSub{color:#15170D;text-shadow:0 1px 0 rgba(255,255,255,.35)}
+.status.live .bignum small{color:rgba(21,23,13,.55)}
+.status.live .sub{color:rgba(21,23,13,.7)}
+.status.live .progress{background:rgba(21,23,13,.18)}
+@keyframes aurora{0%,100%{background-position:0% 50%,100% 0%,50% 100%,30% 40%}50%{background-position:30% 20%,60% 40%,20% 70%,70% 60%}}
+.bignum{font-size:58px;font-weight:800;letter-spacing:-2.5px;line-height:1}
+.bignum small{font-size:30px;color:var(--sub);font-weight:700;letter-spacing:-1px}
+.progress{height:10px;border-radius:5px;background:var(--fill);overflow:hidden}
+.progress i{display:block;height:100%;border-radius:5px;background:linear-gradient(90deg,var(--lime2),var(--lime1));transition:width .5s;box-shadow:0 0 12px rgba(166,232,18,.7)}
+.fold{display:flex;align-items:center;gap:10px;background:var(--card);border-radius:var(--r);padding:16px 20px;font-size:16px;font-weight:600;color:var(--text);width:100%;text-align:left;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.fold .car{margin-left:auto;transition:transform .2s;color:var(--sub)}
+.fold.open .car{transform:rotate(180deg)}
+.bk{background:var(--fill);border-radius:18px;padding:16px;display:flex;flex-direction:column;gap:10px}
+.bk .t{font-size:17px;font-weight:700;letter-spacing:-.3px}
+.log{font-family:ui-monospace,"SF Mono",Menlo,monospace;font-size:12px;line-height:1.8;max-height:260px;overflow-y:auto;color:var(--sub)}
+.log b{color:var(--text);font-weight:500}
+#gate{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:18px;z-index:10}
+.toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:var(--text);color:var(--card);border-radius:100px;padding:12px 22px;
+  font-size:14px;font-weight:600;display:none;z-index:30;max-width:92vw;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.25)}
+.savemark{font-size:12px;font-weight:600;color:var(--sub);opacity:0;transition:opacity .3s}
+.savemark.show{opacity:1}
+::selection{background:var(--lime1);color:var(--ink)}
+@media(max-width:420px){.card{padding:17px}h1{font-size:29px}}
+</style>
+</head>
+<body>
+<div id="gate">
+  <div class="card" style="width:min(400px,94vw);gap:16px">
+    <div style="font-size:44px">🎾</div>
+    <div>
+      <h1>Court Hunter</h1>
+      <div class="sub" style="margin-top:6px">Ловит свободные корты в Даулете и бронирует на вас. Кордай, 6.</div>
+    </div>
+    <input class="input" id="pw" type="password" placeholder="Пароль" autocomplete="current-password">
+    <div id="pwErr" style="color:var(--pink);font-size:13px;font-weight:600;display:none">Пароль не подошёл</div>
+    <button class="cta" onclick="login()">Войти</button>
+    <div class="sub" id="gateHint">Вход запоминается — вводить каждый раз не придётся.</div>
+  </div>
+</div>
+
+<div class="wrap" style="display:none" data-app>
+  <div style="display:flex;align-items:center;gap:10px;padding:6px 4px 0;flex-wrap:wrap">
+    <h1 style="font-size:26px">Court&nbsp;Hunter</h1>
+    <span class="pill" id="demoPill" style="display:none;background:var(--purple);color:#fff">демо</span>
+    <span style="flex:1"></span>
+    <div class="seg" style="flex:none" id="themeSeg">
+      <button data-th="auto">Авто</button><button data-th="light">☀️</button><button data-th="dark">🌙</button>
+    </div>
+  </div>
+
+  <div id="catchSlot"></div>
+
+  <div class="card status" id="statusCard">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <span class="pill" id="huntPill">на паузе</span>
+      <span class="savemark" id="saveMark">Сохранено ✓</span>
+    </div>
+    <div class="bignum" id="bigN">0<small> из 1</small></div>
+    <div class="sub" id="statusSub" style="font-weight:600">поймано кортов</div>
+    <div class="progress"><i id="pbar" style="width:0%"></i></div>
+    <button class="cta" id="toggleBtn" onclick="toggleHunt()">Начать охоту</button>
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap" class="sub">
+      <span id="stLine">проверок 0 · находок 0</span>
+      <span id="tgLine">Telegram: …</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Когда играем</h2>
+    <div>
+      <label>День</label>
+      <div class="chips" id="days"></div>
+    </div>
+    <div class="row">
+      <div><label>С</label><select id="timeFrom"></select></div>
+      <div><label>До</label><select id="timeTo"></select></div>
+    </div>
+    <div class="row" style="align-items:flex-end">
+      <div><label>Сколько играем</label><div class="chips" id="dur"></div></div>
+      <div style="flex:0 0 auto"><label>Кортов нужно</label>
+        <div style="display:flex;align-items:center;gap:12px">
+          <button class="step" onclick="stepN(-1)">−</button>
+          <span id="neededN" style="font-size:26px;font-weight:800;min-width:30px;text-align:center">1</span>
+          <button class="step" onclick="stepN(1)">+</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <button class="fold" id="extraFold" onclick="toggleFold('extra','extraFold')"><span>🎛</span><span>Фильтр: тип, номер, режим</span><span class="car">▾</span></button>
+  <div class="card" id="extra" style="display:none">
+    <div>
+      <label>Тип корта</label>
+      <div class="chips" id="type"></div>
+    </div>
+    <div>
+      <label>Номер корта</label>
+      <div class="sub" id="courtsHint" style="margin-bottom:8px">Сначала тип: у крытых №1–8 и уличных №1–5 нумерация своя.</div>
+      <div class="chips" id="courts"></div>
+    </div>
+    <div>
+      <label>Как бронировать</label>
+      <div class="chips" id="mode"></div>
+      <div class="sub" style="margin-top:8px">«Сначала спросить» — бот пришлёт слот в Telegram и забронирует после вашего «Забрать».</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>На кого бронируем</h2>
+    <div><label>Имя и фамилия</label><input class="input" id="pName" placeholder="Азамат Серикулы" autocomplete="name"></div>
+    <div><label>Телефон</label><input class="input" id="pPhone" placeholder="+7 705 123 45 67" inputmode="tel" autocomplete="tel"></div>
+    <div><label>Почта <span style="font-weight:400">(необязательно)</span></label><input class="input" id="pEmail" placeholder="azamat@mail.kz" inputmode="email" autocomplete="email"></div>
+    <div class="sub">Оплата на месте. Сайт данные не проверяет — главное, чтобы на ресепшене вас узнали.</div>
+  </div>
+
+  <div class="card" id="bookingsCard">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+      <h2>Мои брони</h2>
+      <span class="pill">отмена: онлайн −5ч · звонком −3ч</span>
+    </div>
+    <div id="bookings"><div class="sub" style="padding:4px 0">Пока пусто. Запустите охоту — добыча появится тут и в Telegram.</div></div>
+  </div>
+
+  <button class="fold" id="logFold" onclick="toggleFold('logBox','logFold')"><span>🐾</span><span>Что делает бот</span><span class="car">▾</span></button>
+  <div class="card" id="logBox" style="display:none">
+    <div class="log" id="log"></div>
+    <div class="row">
+      <button class="btn" onclick="checkNow()">Проверить сейчас</button>
+      <button class="btn" onclick="probe()">Тест подключения</button>
+    </div>
+  </div>
+
+  <div class="sub" style="padding:0 6px">В Telegram то же самое кнопками: команда /menu. Слот «завтра 00:00» — это сегодня в полночь, бот сам это учитывает.</div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const TGA=window.Telegram&&Telegram.WebApp&&Telegram.WebApp.initData?Telegram.WebApp:null;
+let TOKEN='',THEME='auto',DEMO=false;
+let TASK={mode:'confirm',needed:1,type:'any',courts:[],dayOffsets:[0],timeFrom:'20:00',timeTo:'22:00',dur:60,active:false};
+let dirty=false,seq=0,saveTimer=null;
+const WDN=['вс','пн','вт','ср','чт','пт','сб'];
+
+// --- хранилище: Telegram CloudStorage → localStorage ---
+const stg={
+  get:k=>new Promise(r=>{ if(TGA&&TGA.CloudStorage){TGA.CloudStorage.getItem(k,(e,v)=>r(v||localStorage.getItem(k)||''));} else r(localStorage.getItem(k)||''); }),
+  set:(k,v)=>{ try{localStorage.setItem(k,v);}catch(e){} if(TGA&&TGA.CloudStorage)TGA.CloudStorage.setItem(k,v,()=>{}); }
+};
+
+// --- тема ---
+function sysDark(){ return TGA?TGA.colorScheme==='dark':matchMedia('(prefers-color-scheme: dark)').matches; }
+function applyTheme(){
+  const dark=THEME==='dark'||(THEME==='auto'&&sysDark());
+  document.documentElement.setAttribute('data-theme',dark?'dark':'light');
+  document.querySelector('meta[name=theme-color]').content=dark?'#0A0A0C':'#F2F2F7';
+  if(TGA){try{TGA.setHeaderColor(dark?'#0A0A0C':'#F2F2F7');TGA.setBackgroundColor(dark?'#0A0A0C':'#F2F2F7');}catch(e){}}
+  document.querySelectorAll('#themeSeg button').forEach(b=>b.classList.toggle('on',b.dataset.th===THEME));
+}
+document.querySelectorAll('#themeSeg button').forEach(b=>b.onclick=()=>{THEME=b.dataset.th;stg.set('ab_theme',THEME);applyTheme();});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>THEME==='auto'&&applyTheme());
+if(TGA){TGA.ready();TGA.expand();TGA.onEvent('themeChanged',()=>THEME==='auto'&&applyTheme());}
+
+// --- демо-режим (когда бэкенда нет: локальный предпросмотр) ---
+const demo={stats:{checks:0,found:0,errors:0},bookings:[],log:[],profile:{name:'Азамат',phone:'+7 705 123 45 67',email:''},iv:null};
+function dLog(m){demo.log.unshift({t:Date.now(),m});demo.log=demo.log.slice(0,40);}
+function enableDemo(){
+  if(DEMO)return;DEMO=true;$('demoPill').style.display='';
+  $('gateHint').textContent='Демо: сервер не подключён. Пароль — MeiroDictador1995.';
+  dLog('Это демо: сайт кортов не трогаю, брони понарошку');
+  demo.iv=setInterval(()=>{ if(!TASK.active)return;
+    demo.stats.checks++;
+    if(Math.random()<.55){dLog('Проверил расписание — свободного нет, слежу дальше');refresh();return;}
+    const pool=TASK.type==='outdoor'?[['Уличный корт №',5]]:TASK.type==='indoor'?[['Крытый корт №',8]]:[['Крытый корт №',8],['Уличный корт №',5]];
+    const [pre,max]=pool[Math.floor(Math.random()*pool.length)];
+    let n;do{n=1+Math.floor(Math.random()*max);}while(TASK.courts.length&&!TASK.courts.includes(n)&&TASK.type!=='any');
+    const off=TASK.dayOffsets[Math.floor(Math.random()*TASK.dayOffsets.length)]||0;
+    const fh=parseInt(TASK.timeFrom),th=TASK.timeTo==='24:00'?24:parseInt(TASK.timeTo);
+    const hs=[];for(let h=fh;h+TASK.dur/60<=th;h++)hs.push(h);
+    if(!hs.length)return;
+    const h=hs[Math.floor(Math.random()*hs.length)];
+    const d=new Date();d.setHours(h,0,0,0);const start=d.getTime()+off*864e5;
+    if(start<Date.now()+30*6e4)return;
+    if(demo.bookings.some(b=>!b.cancelled&&b.start===start&&b.title===pre+n))return;
+    demo.stats.found++;
+    const title=pre+n;
+    dLog('🎯 Нашёл: '+title+', '+dWhen(start));
+    const book=()=>{demo.bookings.push({id:Math.random().toString(36).slice(2),title,start,price:3500*TASK.dur/60});
+      dLog('✅ Забронировал '+title+' — сообщение улетело в Telegram');
+      if(demo.bookings.filter(b=>!b.cancelled).length>=TASK.needed){TASK.active=false;dLog('🏁 Всё поймано — охота выключена');}
+      refresh();};
+    if(TASK.mode==='auto')book();
+    else{dLog('✋ Спросил в Telegram, жду «Забрать»…');setTimeout(()=>{if(TASK.active){dLog('👍 Вы нажали «Забрать» (демо)');book();}},7000);}
+    refresh();
+  },5000);
+}
+function dWhen(start){const dd=Math.floor((start-new Date().setHours(0,0,0,0))/864e5);
+  const w=['сегодня','завтра','послезавтра'][dd]||'скоро';const d=new Date(start);
+  return w+' '+String(d.getHours()).padStart(2,'0')+':00–'+String((d.getHours()+TASK.dur/60)%24).padStart(2,'0')+':00';}
+function demoApi(action,extra){
+  const a=hunt=>({ok:true,...hunt});
+  switch(action){
+    case 'login':return {ok:extra.password==='MeiroDictador1995',token:'demo',error:'Пароль не подошёл'};
+    case 'state':return a({task:{...TASK},profile:demo.profile,stats:demo.stats,tg:1,
+      bookings:demo.bookings.filter(b=>!b.cancelled).map(b=>({id:b.id,title:b.title,when:dWhen(b.start),start:b.start,price:b.price,online:b.start-5*36e5,phone:b.start-3*36e5,midnight:new Date(b.start).getHours()===0})),
+      log:demo.log.map(l=>({t:l.t,m:l.m}))});
+    case 'save':if(extra.task)TASK={...TASK,...extra.task,active:TASK.active};if(extra.profile)Object.assign(demo.profile,extra.profile);return {ok:true};
+    case 'start':TASK.active=true;dLog('🟢 Охота запущена — проверяю каждые ~15 сек');return {ok:true};
+    case 'stop':TASK.active=false;dLog('⏹ Охота остановлена');return {ok:true};
+    case 'cancelBooking':{const b=demo.bookings.find(x=>x.id===extra.id);if(b){b.cancelled=true;dLog('↩️ Отменил '+b.title+' — слот снова свободен');}return {ok:true};}
+    case 'probe':return {ok:true,probe:{altegio:true,courts:13,tg:true,tgLinked:1,kv:true}};
+    case 'check':demo.stats.checks++;dLog('Проверил вручную — свободного нет');return {ok:true,result:{found:0}};
+  }
+  return {ok:false};
+}
+
+// --- API ---
+async function api(action,extra){
+  extra=extra||{};
+  if(DEMO)return demoApi(action,extra);
+  let r;
+  try{ r=await fetch('/api/app',{method:'POST',headers:{'Content-Type':'application/json','x-auth':TOKEN},body:JSON.stringify({action,...extra})}); }
+  catch(e){ enableDemo(); return demoApi(action,extra); }
+  if(r.status===404||r.status===405){ enableDemo(); return demoApi(action,extra); }
+  if(r.status===401&&action!=='login'){ TOKEN=''; stg.set('ab_token',''); location.reload(); return {ok:false}; }
+  return r.json().catch(()=>({ok:false}));
+}
+function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',3200);}
+
+async function login(){
+  const r=await api('login',{password:$('pw').value});
+  if(r.ok){TOKEN=r.token;stg.set('ab_token',TOKEN);enter();}
+  else $('pwErr').style.display='block';
+}
+$('pw').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
+function enter(){$('gate').style.display='none';document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');refresh();setInterval(refresh,8000);}
+function toggleFold(id,foldId){const el=$(id),open=el.style.display!=='none';el.style.display=open?'none':'flex';$(foldId).classList.toggle('open',!open);}
+
+// --- автосохранение: правки не теряются ---
+function markDirty(){dirty=true;seq++;const my=seq;$('saveMark').classList.remove('show');
+  clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{
+    const r=await api('save',collect());
+    if(r.ok&&my===seq){dirty=false;$('saveMark').classList.add('show');setTimeout(()=>$('saveMark').classList.remove('show'),2200);}
+  },600);}
+function mutate(fn){fn();renderTask();markDirty();}
+
+function chips(el,items,get,set){
+  el.innerHTML='';
+  items.forEach(([v,l])=>{const b=document.createElement('button');b.className='chip'+(get(v)?' on':'');b.textContent=l;
+    b.onclick=()=>mutate(()=>set(v));el.appendChild(b);});
+}
+function dayLabel(off){
+  const d=new Date(Date.now()+off*864e5);
+  return ['Сегодня','Завтра','Послезавтра'][off]+' · '+WDN[d.getDay()]+' '+String(d.getDate()).padStart(2,'0')+'.'+String(d.getMonth()+1).padStart(2,'0');
+}
+function renderTask(){
+  $('neededN').textContent=TASK.needed;
+  chips($('days'),[0,1,2].map(o=>[o,dayLabel(o)]),v=>TASK.dayOffsets.includes(v),v=>{
+    const nx=TASK.dayOffsets.includes(v)?TASK.dayOffsets.filter(x=>x!==v):[...TASK.dayOffsets,v].sort();
+    if(nx.length)TASK.dayOffsets=nx;else toast('Хотя бы один день нужен');});
+  chips($('dur'),[[60,'1 час'],[120,'2 часа'],[180,'3 часа']],v=>TASK.dur===v,v=>TASK.dur=v);
+  chips($('type'),[['any','Любой'],['indoor','Крытый'],['outdoor','Уличный']],v=>TASK.type===v,v=>{TASK.type=v;TASK.courts=[];});
+  if(TASK.type==='any'){$('courtsHint').style.display='';$('courts').innerHTML='';}
+  else{$('courtsHint').style.display='none';
+    const maxN=TASK.type==='indoor'?8:5;
+    const items=[[0,'Любой №'],...Array.from({length:maxN},(_,i)=>[i+1,'№'+(i+1)])];
+    chips($('courts'),items,v=>v===0?TASK.courts.length===0:TASK.courts.includes(v),v=>{
+      if(v===0)TASK.courts=[];
+      else TASK.courts=TASK.courts.includes(v)?TASK.courts.filter(x=>x!==v):[...TASK.courts,v].sort();});}
+  chips($('mode'),[['confirm','✋ Сначала спросить'],['auto','⚡ Бронить сразу']],v=>TASK.mode===v,v=>TASK.mode=v);
+  const opts=[];for(let h=6;h<=24;h++)opts.push(String(h).padStart(2,'0')+':00');
+  $('timeFrom').innerHTML=opts.slice(0,-1).map(o=>`<option ${o===TASK.timeFrom?'selected':''}>${o}</option>`).join('');
+  $('timeTo').innerHTML=opts.slice(1).map(o=>`<option ${o===TASK.timeTo?'selected':''}>${o==='24:00'?'24:00 · полночь':o}</option>`).join('');
+  const act=TASK.active;
+  $('toggleBtn').textContent=act?'Остановить':'Начать охоту';
+  $('toggleBtn').classList.toggle('stop',act);
+  $('huntPill').textContent=act?'● ловлю прямо сейчас':'на паузе';
+  $('huntPill').className='pill'+(act?' live':'');
+  $('statusCard').classList.toggle('live',act);
+}
+function stepN(d){mutate(()=>{TASK.needed=Math.max(1,Math.min(10,TASK.needed+d));});}
+$('timeFrom').addEventListener('change',()=>mutate(()=>{TASK.timeFrom=$('timeFrom').value;
+  if(parseInt(TASK.timeTo)<=parseInt(TASK.timeFrom)){const h=parseInt(TASK.timeFrom)+1;TASK.timeTo=h===24?'24:00':String(h).padStart(2,'0')+':00';}}));
+$('timeTo').addEventListener('change',()=>mutate(()=>{TASK.timeTo=$('timeTo').value;}));
+
+// --- телефон: +7 и не больше 10 цифр ---
+function maskPhone(){
+  const el=$('pPhone');let d=el.value.replace(/\D/g,'');
+  if(d.startsWith('8'))d='7'+d.slice(1);
+  if(d&&!d.startsWith('7'))d='7'+d;
+  d=d.slice(0,11);
+  if(!d){el.value='';return;}
+  const r=d.slice(1);let out='+7';
+  if(r.length)out+=' '+r.slice(0,3);
+  if(r.length>3)out+=' '+r.slice(3,6);
+  if(r.length>6)out+=' '+r.slice(6,8);
+  if(r.length>8)out+=' '+r.slice(8,10);
+  el.value=out;
+}
+$('pPhone').addEventListener('input',()=>{maskPhone();markDirty();});
+$('pPhone').addEventListener('focus',()=>{if(!$('pPhone').value)$('pPhone').value='+7 ';});
+$('pName').addEventListener('input',markDirty);
+$('pEmail').addEventListener('input',markDirty);
+
+function collect(){
+  return {task:{...TASK},profile:{name:$('pName').value.trim(),phone:$('pPhone').value.trim(),email:$('pEmail').value.trim()}};
+}
+async function toggleHunt(){
+  if(TASK.active){await api('stop');TASK.active=false;renderTask();toast('Остановил. Продолжим, когда скажете');}
+  else{
+    await api('save',collect());
+    const r=await api('start');
+    if(r.ok){TASK.active=true;renderTask();toast('Погнали! Проверяю каждые ~15 секунд 🎾');}
+    else toast(r.error||'Не получилось');
+  }
+  refresh();
+}
+async function checkNow(){toast('Смотрю расписание…');const r=await api('check');toast(r.ok?('Готово: новых слотов '+((r.result&&r.result.found)||0)):(r.error||'Не вышло'));refresh();}
+async function probe(){
+  toast('Проверяю связь…');const r=await api('probe');
+  if(!r.ok)return toast('Что-то не так с сервером');
+  const p=r.probe;
+  toast(`Сайт кортов: ${p.altegio?'✅ кортов '+p.courts:'❌'} · Telegram: ${p.tg?(p.tgLinked?'✅':'⚠️ не подключён'):'❌'} · Память: ${p.kv?'✅':'❌'}`+(p.error?' · '+p.error:''));
+}
+async function cancelBk(id){if(!confirm('Точно отменить бронь?'))return;const r=await api('cancelBooking',{id});toast(r.ok?'Отменил. Слот снова свободен':(r.error||'Не вышло'));refresh();}
+function left(ms){const d=ms-Date.now();if(d<=0)return null;const h=Math.floor(d/36e5),m=Math.floor(d%36e5/6e4);return h?`${h}ч ${String(m).padStart(2,'0')}м`:`${m} мин`;}
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function inputsBusy(){const a=document.activeElement;return a&&/^(INPUT|SELECT)$/.test(a.tagName);}
+async function refresh(){
+  const r=await api('state');
+  if(!r.ok)return;
+  if(!dirty&&!inputsBusy()){
+    TASK=Object.assign(TASK,r.task);
+    renderTask();
+    $('pName').value=r.profile.name||'';
+    $('pPhone').value=r.profile.phone||'';maskPhone();
+    $('pEmail').value=r.profile.email||'';
+  }else{renderTask();}
+  $('tgLine').textContent='Telegram: '+(r.tg?('подключён ('+r.tg+')'):'ещё не подключён');
+  const n=r.bookings.length,need=(!dirty?r.task.needed:TASK.needed);
+  $('bigN').innerHTML=`${n}<small> из ${need}</small>`;
+  $('statusSub').textContent=n>=need&&n>0?'все корты пойманы 🏁':'поймано кортов';
+  $('pbar').style.width=Math.min(100,Math.round(n/Math.max(1,need)*100))+'%';
+  $('stLine').textContent=`проверок ${r.stats.checks} · находок ${r.stats.found}`;
+  $('bookings').innerHTML=n?r.bookings.map(b=>{
+    const lo=left(b.online),lp=left(b.phone);
+    return `<div class="bk">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><span class="t">${esc(b.title)}</span><span style="font-weight:700;color:var(--purple)">${b.price?b.price+' ₸':''}</span></div>
+      <div style="font-size:15px">${esc(b.when)}${b.midnight?' <span style="color:var(--purple);font-weight:600">🌙 это сегодня в полночь</span>':''}</div>
+      <div class="chips">
+        <span class="pill" ${lo?'style="background:linear-gradient(135deg,var(--lime1),var(--lime2));color:var(--ink)"':''}>${lo?'онлайн-отмена ещё '+lo:'онлайн-отмена закрыта'}</span>
+        <span class="pill">${lp?'звонком ещё '+lp:'отмена закрыта'}</span>
+      </div>
+      ${lo?`<button class="btn danger" onclick="cancelBk('${b.id}')">Отменить бронь</button>`:(lp?'<div class="sub">Онлайн уже поздно — только звонком на корты</div>':'')}
+    </div>`;
+  }).join(''):'<div class="sub" style="padding:4px 0">Пока пусто. Запустите охоту — добыча появится тут и в Telegram.</div>';
+  const bc=$('bookingsCard'),slot=$('catchSlot');
+  if(n&&bc.parentNode!==slot)slot.appendChild(bc);
+  else if(!n&&bc.parentNode===slot)$('logFold').parentNode.insertBefore(bc,$('logFold'));
+  $('log').innerHTML=(r.log||[]).map(l=>{
+    const d=new Date(l.t+(DEMO?0:5*36e5));const p=x=>String(x).padStart(2,'0');
+    const hh=DEMO?[d.getHours(),d.getMinutes(),d.getSeconds()]:[d.getUTCHours(),d.getUTCMinutes(),d.getUTCSeconds()];
+    return `<div>${p(hh[0])}:${p(hh[1])}:${p(hh[2])} <b>${esc(l.m)}</b></div>`;
+  }).join('')||'<div class="sub">Тишина — бот ещё ничего не делал.</div>';
+}
+
+(async()=>{
+  THEME=(await stg.get('ab_theme'))||'auto';applyTheme();
+  TOKEN=(await stg.get('ab_token'))||'';
+  if(TOKEN){const r=await api('state');if(r.ok){enter();return;}TOKEN='';}
+  applyTheme();
+})();
+</script>
+</body>
+</html>
