@@ -75,6 +75,9 @@ const pickService = (services, durMin, indoor) => {
 };
 
 const activeBookings = s => s.bookings.filter(b => !b.cancelled && b.start > Date.now() - 3600e3);
+const goalHours = s => Math.max(1, s.task.needed) * Math.max(1, Math.round((s.task.dur || 60) / 60));
+const bookedHours = s => activeBookings(s).reduce((n, b) => n + Math.max(1, Math.round((b.dur || 60) / 60)), 0);
+const leftHours = s => goalHours(s) - bookedHours(s);
 
 function courtTitle(meta, name) {
   if (meta && meta.court != null) {
@@ -94,7 +97,7 @@ async function sweep(s) {
   if (!t.active) return { skipped: 'off' };
   s.stats.checks++;
   const now = Date.now();
-  const remaining = () => t.needed - activeBookings(s).length;
+  const remaining = () => leftHours(s);
   if (remaining() <= 0) return finishTask(s);
 
   let targets;
@@ -112,7 +115,7 @@ async function sweep(s) {
   for (let i = 0; i < Math.min(COMBO_CAP, combos.length); i++) batch.push(combos[(start + i) % combos.length]);
   s.rot = (start + batch.length) % combos.length;
 
-  const hoursNeeded = Math.max(1, Math.round(t.dur / 60));
+  const wantHours = Math.max(1, Math.round(t.dur / 60));
   const foundNew = [];
   let apiOk = 0, apiFail = 0;
   for (const { d, c } of batch) {
@@ -133,26 +136,30 @@ async function sweep(s) {
     const freeSet = new Set(free);
 
     for (const startMs of free) {
-      // нужно hoursNeeded подряд идущих часов
-      let ok = true;
-      for (let k = 1; k < hoursNeeded; k++) if (!freeSet.has(startMs + k * 3600e3)) { ok = false; break; }
-      if (!ok) continue;
       if (!L.slotMatches(t, d, startMs, now)) continue;
+      // сколько часов подряд свободно от этого старта
+      let run = 1;
+      while (run < wantHours && freeSet.has(startMs + run * 3600e3)) run++;
+      // целый блок — идеально; иначе один час, если разрешено набирать по частям
+      const takeH = run >= wantHours ? wantHours : (t.split !== false ? 1 : 0);
+      if (!takeH) continue;
       const key = L.slotKey(c.staffId, startMs);
       if (s.seen[key]) continue;
       if (s.bookings.some(b => !b.cancelled && b.staffId === c.staffId && b.start === startMs)) continue;
       s.seen[key] = Date.now();
       s.stats.found++;
-      foundNew.push({ target: c, svc, startMs, key, raw: raw.get(startMs) || null });
+      foundNew.push({ target: c, svc, startMs, key, raw: raw.get(startMs) || null, hours: takeH });
     }
   }
   if (!apiOk && apiFail) { s.stats.errors++; log(s, `Расписание не отдалось ни по одному корту (${apiFail} попыток) — вероятно, устарел ключ`, 1); }
 
   let asked = 0;
   for (const f of foundNew) {
-    if (remaining() <= 0) break;
-    if (t.mode === 'auto') await doBook(s, f.target.staffId, f.svc && f.svc.id, f.startMs, f.raw);
-    else if (asked < 3) { await offerSlot(s, f); asked++; }
+    const left = remaining();
+    if (left <= 0) break;
+    const hrs = Math.min(f.hours || 1, left);
+    if (t.mode === 'auto') await doBook(s, f.target.staffId, f.svc && f.svc.id, f.startMs, f.raw, hrs * 60);
+    else if (asked < 4) { await offerSlot(s, f, hrs * 60); asked++; }
   }
   if (!foundNew.length) log(s, `Проверка №${s.stats.checks}: свободного нет, слежу дальше`);
   if (remaining() <= 0) await finishTask(s);
@@ -161,14 +168,15 @@ async function sweep(s) {
 }
 
 // ---------- предложение (режим «спросить меня») ----------
-async function offerSlot(s, f) {
+async function offerSlot(s, f, durMin) {
   const c = f.target;
-  const hrs = Math.max(1, Math.round(s.task.dur / 60));
+  const dur = durMin || s.task.dur;
+  const hrs = Math.max(1, Math.round(dur / 60));
   const o = {
     id: Math.random().toString(36).slice(2, 9),
     staffId: c.staffId, serviceId: f.svc ? f.svc.id : null, raw: f.raw || null,
     court: c.court, indoor: c.indoor, name: c.name,
-    start: f.startMs, dur: s.task.dur,
+    start: f.startMs, dur,
     price: f.svc && f.svc.price ? f.svc.price * hrs : null
   };
   s.offers = [o, ...(s.offers || [])].slice(0, 12);
@@ -188,14 +196,15 @@ const findOffer = (s, id) => (s.offers || []).find(o => o.id === id);
 function dropOffer(s, id) { s.offers = (s.offers || []).filter(o => o.id !== id); }
 
 // ---------- бронирование (несколько часов = несколько записей) ----------
-async function doBook(s, staffId, serviceId, startMs, rawDatetime) {
+async function doBook(s, staffId, serviceId, startMs, rawDatetime, durMin) {
   const t = s.task;
+  const dur = durMin || t.dur;
   const targets = (s.targets && s.targets.list) || [];
   const target = targets.find(x => x.staffId === Number(staffId)) || { staffId, name: '', court: null, indoor: null, services: [] };
   const svc = (target.services || []).find(x => x.id === Number(serviceId))
     || pickService(target.services, t.dur, target.indoor);
   const title = courtTitle(target, target.name);
-  const hours = Math.max(1, Math.round(t.dur / 60));
+  const hours = Math.max(1, Math.round(dur / 60));
   const parts = [];
 
   for (let k = 0; k < hours; k++) {
@@ -218,8 +227,8 @@ async function doBook(s, staffId, serviceId, startMs, rawDatetime) {
       const why = busy ? 'этот час уже заняли' : (msg || JSON.stringify(j.meta || j.data || '')).slice(0, 160);
       // если первый час уже сорвался — просто идём дальше; если сорвался второй — откатываем первый
       for (const p of parts) await alt.cancel(p.recordId, p.hash, s.apiBase).catch(() => {});
-      log(s, `Бронь не прошла (${title}, ${L.whenText(startMs, t.dur)}): ${why}`, taken ? 0 : 1);
-      if (!taken) await notifyError(s, `Бронь не прошла: ${title}, ${L.whenText(startMs, t.dur)}\n${why}`);
+      log(s, `Бронь не прошла (${title}, ${L.whenText(startMs, dur)}): ${why}`, taken ? 0 : 1);
+      if (!taken) await notifyError(s, `Бронь не прошла: ${title}, ${L.whenText(startMs, dur)}\n${why}`);
       return { ok: false, why: busy ? 'Не успели — этот час уже заняли' : why };
     }
     const rec = (Array.isArray(j.data) && j.data[0]) || j.data || {};
@@ -228,7 +237,7 @@ async function doBook(s, staffId, serviceId, startMs, rawDatetime) {
     if (!recordId) {   // «успех» без номера записи — брони нет, фантом не создаём
       for (const p of parts) await alt.cancel(p.recordId, p.hash, s.apiBase).catch(() => {});
       s.stats.errors++;
-      log(s, 'Сайт не вернул номер записи (' + title + ', ' + L.whenText(startMs, t.dur) + ') — брони нет', 1);
+      log(s, 'Сайт не вернул номер записи (' + title + ', ' + L.whenText(startMs, dur) + ') — брони нет', 1);
       return { ok: false, why: 'Сайт не подтвердил запись — попробуйте ещё раз' };
     }
     parts.push({ recordId, hash, start: ms });
@@ -238,24 +247,24 @@ async function doBook(s, staffId, serviceId, startMs, rawDatetime) {
     id: Math.random().toString(36).slice(2, 9),
     recordId: parts[0].recordId, hash: parts[0].hash, parts,
     staffId: Number(staffId), court: target.court, indoor: target.indoor, name: target.name,
-    start: startMs, dur: t.dur,
+    start: startMs, dur,
     price: svc && svc.price ? svc.price * hours : null, service: svc && svc.title,
     cancelled: false, createdAt: Date.now()
   };
   s.bookings.push(b);
   s.stats.booked++;
-  log(s, `Поймал! ${title}, ${L.whenText(startMs, t.dur)} ✅`);
-  const done = t.needed - activeBookings(s).length <= 0;
+  log(s, `Поймал! ${title}, ${L.whenText(startMs, dur)} ✅`);
+  const done = leftHours(s) <= 0;
   if (done) t.active = false;
   const d = L.deadlines(startMs);
   await sendAll(s,
     `🎾 <b>Поймал корт!</b>\n` +
-    `${title} · ${L.whenText(startMs, t.dur)}${L.midnightNote(startMs)}\n` +
+    `${title} · ${L.whenText(startMs, dur)}${L.midnightNote(startMs)}\n` +
     (b.price ? `${b.price} ₸${hours > 1 ? ` (${hours} ч)` : ''} · оплата на месте\n` : `Оплата на месте\n`) +
     `Записал на: ${s.profile.name || '—'}\n\n` +
     `Передумаете — отменить онлайн можно до ${L.hm(d.online)}, дальше только звонок на ресепшн (до ${L.hm(d.phone)}).\n` +
     `📍 Daulet Tennis, ул. Кордай, 6` +
-    (done ? `\n\n🏁 Всё, цель набрана — охоту выключил.` : ''),
+    (done ? `\n\n🏁 Всё, цель набрана — охоту выключил.` : `\n\nОсталось поймать: ${leftHours(s)} ч`),
     { reply_markup: { inline_keyboard: [[{ text: '↩️ Отменить бронь', callback_data: `c|${b.id}` }]] } });
   return { ok: true, booking: b };
 }
@@ -264,8 +273,8 @@ async function takeOffer(s, id) {
   const o = findOffer(s, id);
   if (!o) return { ok: false, why: 'Это предложение уже неактуально' };
   if (Date.now() > o.start - 10 * 60e3) { dropOffer(s, id); return { ok: false, why: 'Слот уже в прошлом' }; }
-  if (activeBookings(s).length >= s.task.needed) return { ok: false, why: 'Цель уже набрана' };
-  const r = await doBook(s, o.staffId, o.serviceId, o.start, o.raw);
+  if (leftHours(s) <= 0) return { ok: false, why: 'Цель уже набрана' };
+  const r = await doBook(s, o.staffId, o.serviceId, o.start, o.raw, o.dur);
   if (r.ok || /заняли|увели/i.test(r.why || '')) dropOffer(s, id);
   return r;
 }
@@ -330,9 +339,11 @@ function statusText(s) {
   const days = (t.dayOffsets && t.dayOffsets.length ? t.dayOffsets : [0, 1, 2]).map(o => ['сегодня', 'завтра', 'послезавтра'][o]).join(', ');
   const type = t.type === 'indoor' ? 'крытые' : t.type === 'outdoor' ? 'открытые' : 'любой тип';
   const nums = t.type !== 'any' && t.courts && t.courts.length ? ' №' + t.courts.join(', ') : '';
-  let out = `${t.active ? '🟢 Охочусь' : '⚪ На паузе'} · поймано ${act.length} из ${t.needed}\n`;
+  const gh = goalHours(s), bh = bookedHours(s);
+  let out = `${t.active ? '🟢 Охочусь' : '⚪ На паузе'} · поймано ${bh} из ${gh} ч${act.length ? ` (${act.length} брони)` : ''}\n`;
   out += `🗓 ${days} · старты ${L.hourLabel(parseInt(t.timeFrom))}–${L.hourLabel(parseInt(t.timeTo))} · ${Math.round(t.dur / 60)} ч\n`;
-  out += `🎾 ${type}${nums} · ${t.mode === 'auto' ? 'бронирую сразу' : 'сначала спрашиваю'}\n`;
+  out += `🎾 ${type}${nums} · ${t.mode === 'auto' ? 'бронирую сразу' : 'сначала спрашиваю'}${t.split !== false ? ' · можно по частям' : ''}\n`;
+  out += `⏱ Обновляю каждые ${t.interval || 15} с\n`;
   out += `🔁 Проверок ${s.stats.checks} · находок ${s.stats.found}${s.stats.errors ? ` · сбоев ${s.stats.errors}` : ''}`;
   if (s.targets && s.targets.list) out += `\n🏟 Кортов вижу: ${s.targets.list.length}`;
   if (t.active) out += `\n📡 Фоновый поиск: ${s.chainAt && Date.now() - s.chainAt < 100e3 ? 'работает' : 'перезапускается'}`;
@@ -354,7 +365,7 @@ function pruneOffers(s) {
   s.offers = (s.offers || []).filter(o => {
     if (o.start < now + 10 * 60e3) return false;
     if (!L.courtOk(t, o)) return false;
-    if (o.dur !== t.dur) return false;
+    if (o.dur > t.dur) return false;
     const entry = dates.find(d => d.iso === L.localISODate(o.start));
     return entry ? L.slotMatches(t, entry, o.start, now) : false;
   });
@@ -371,4 +382,4 @@ function dropPhantoms(s) {
   return bad.length;
 }
 
-module.exports = { pruneOffers, dropPhantoms, sweep, doBook, doCancel, reminders, statusText, activeBookings, ensureTargets, courtTitle, sendAll, takeOffer, findOffer, dropOffer, pickService };
+module.exports = { goalHours, bookedHours, leftHours, pruneOffers, dropPhantoms, sweep, doBook, doCancel, reminders, statusText, activeBookings, ensureTargets, courtTitle, sendAll, takeOffer, findOffer, dropOffer, pickService };

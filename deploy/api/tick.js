@@ -8,7 +8,7 @@ const hunt = require('../lib/hunt');
 const L = require('../lib/logic');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const CHAIN_TTL = 100e3;          // цепочка считается живой, если звено было меньше 100 сек назад
+const CHAIN_TTL = 75e3;           // цепочка жива, если звено отметилось меньше 75 сек назад
 
 function selfUrl(req) {
   const env = (process.env.APP_URL || '').replace(/\/+$/, '');
@@ -17,12 +17,18 @@ function selfUrl(req) {
   return host ? `https://${host}` : null;
 }
 
-// Запустить следующее звено, не дожидаясь ответа
-function passBaton(req, extra) {
+// Передать эстафету следующему звену.
+// Ждём, пока запрос ГАРАНТИРОВАННО уйдёт (иначе Vercel заморозит инстанс раньше),
+// затем обрываем соединение — принимающий вызов продолжает жить сам по себе.
+async function passBaton(req) {
   const base = selfUrl(req);
-  if (!base || !process.env.TICK_KEY) return;
-  const url = `${base}/api/tick?key=${encodeURIComponent(process.env.TICK_KEY)}&chain=1${extra || ''}`;
-  try { fetch(url, { method: 'GET', headers: { 'x-chain': '1' } }).catch(() => {}); } catch (e) {}
+  if (!base || !process.env.TICK_KEY) return false;
+  const url = `${base}/api/tick?key=${encodeURIComponent(process.env.TICK_KEY)}&chain=1&n=${Date.now()}`;
+  const ac = new AbortController();
+  const started = fetch(url, { method: 'GET', headers: { 'x-chain': '1' }, signal: ac.signal }).catch(() => {});
+  await Promise.race([started, sleep(2500)]);   // 2.5 сек хватает, чтобы Vercel принял запрос
+  try { ac.abort(); } catch (e) {}
+  return true;
 }
 
 module.exports = async (req, res) => {
@@ -61,11 +67,13 @@ module.exports = async (req, res) => {
   }
 
   // --- рабочее звено: ~45 сек проходов каждые 15 сек ---
-  const spacing = Math.max(10, Number(process.env.POLL_INTERVAL_SEC || 15)) * 1000;
-  const sweeps = Math.max(1, Math.min(4, Number(process.env.SWEEPS_PER_CALL || 3)));
+  const spacing = Math.max(1, Math.min(60, Number(s.task.interval || process.env.POLL_INTERVAL_SEC || 15))) * 1000;
+  const budget = 45000;                                  // ~45 сек работы, остальное на эстафету
+  const sweeps = Math.max(1, Math.min(45, Math.floor(budget / spacing)));
   const results = [];
+  const until = Date.now() + budget;
 
-  for (let i = 0; i < sweeps; i++) {
+  for (let i = 0; i < sweeps && Date.now() < until; i++) {
     s = await store.load();                        // свежее состояние: могли остановить из бота
     if (s.botOn === false || !s.task.active) { results.push({ stopped: true }); break; }
     s.chainAt = Date.now();
@@ -76,10 +84,15 @@ module.exports = async (req, res) => {
     if (i < sweeps - 1) await sleep(spacing);
   }
 
-  // --- передаём эстафету следующему звену ---
+  // --- эстафета следующему звену ---
   const fresh = await store.load();
-  if (fresh.task.active && fresh.botOn !== false) passBaton(req);
-  else { fresh.chainAt = 0; await store.save(fresh); }
+  let handed = false;
+  if (fresh.task.active && fresh.botOn !== false) {
+    fresh.chainAt = Date.now();
+    await store.save(fresh);
+    handed = await passBaton(req);
+    if (!handed) { fresh.chainAt = 0; await store.save(fresh); }
+  } else { fresh.chainAt = 0; await store.save(fresh); }
 
-  return res.status(200).json({ ok: true, at: L.fmt(Date.now()), chain: isChain ? 'link' : 'started', results });
+  return res.status(200).json({ ok: true, at: L.fmt(Date.now()), chain: isChain ? 'link' : 'started', handed, sweeps: results.length, results: results.slice(-3) });
 };

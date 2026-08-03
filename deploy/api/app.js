@@ -50,6 +50,7 @@ module.exports = async (req, res) => {
           task: s.task, profile: s.profile, stats: s.stats,
           tg: (s.chats || []).length,
           botOn: s.botOn !== false,
+          goalHours: hunt.goalHours(s), bookedHours: hunt.bookedHours(s),
           lastTick: s.lastTick || 0,
           chainAt: s.chainAt || 0,
           bg: !!(s.chainAt && Date.now() - s.chainAt < CHAIN_TTL),
@@ -73,6 +74,9 @@ module.exports = async (req, res) => {
           if (!t.dayOffsets.length) t.dayOffsets = [0];
           if (!['any', 'indoor', 'outdoor'].includes(t.type)) t.type = 'any';
           if (![60, 120, 180].includes(t.dur)) t.dur = 60;
+          if (![1, 5, 10, 15, 30, 60].includes(Number(t.interval))) t.interval = 15;
+          t.interval = Number(t.interval);
+          t.split = t.split !== false;
           if (t.type === 'any') t.courts = [];
           L.fitWindow(t);
           const fchg = JSON.stringify({ ...s.task, active: 0 }) !== JSON.stringify({ ...t, active: 0 });
@@ -95,7 +99,7 @@ module.exports = async (req, res) => {
       case 'start': {
         if (s.botOn === false) return res.status(200).json({ ok: false, error: 'Бот выключен владельцем' });
         if (!s.profile.phone || !s.profile.name) return res.status(200).json({ ok: false, error: 'Сначала имя и телефон — на кого бронировать?' });
-        if (hunt.activeBookings(s).length >= s.task.needed) return res.status(200).json({ ok: false, error: 'Цель уже набрана — увеличьте «сколько кортов»' });
+        if (hunt.leftHours(s) <= 0) return res.status(200).json({ ok: false, error: 'Цель уже набрана — увеличьте «сколько кортов»' });
         s.task.active = true;
         s.stats.startedAt = Date.now();
         hunt.dropPhantoms(s);
@@ -125,7 +129,8 @@ module.exports = async (req, res) => {
       }
       case 'pulse': {
         if (s.botOn === false || !s.task.active) return res.status(200).json({ ok: true, idle: true });
-        if (Date.now() - (s.lastPulse || 0) < 9000) return res.status(200).json({ ok: true, skipped: true });
+        const minGap = Math.max(1, Number(s.task.interval || 15)) * 1000 - 1000;
+        if (Date.now() - (s.lastPulse || 0) < minGap) return res.status(200).json({ ok: true, skipped: true });
         s.lastPulse = Date.now(); s.lastTick = Date.now();
         const r = await hunt.sweep(s);
         await store.save(s);

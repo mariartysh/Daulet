@@ -118,6 +118,8 @@ function vWhen(s) {
     [btn('−', 'Wt|-1'), btn(`конец  ${L.hourLabel(parseInt(t.timeTo))}`, 'x'), btn('+', 'Wt|1')],
     [btn(`${t.dur === 60 ? '✅ ' : ''}1 час`, 'Du|60'), btn(`${t.dur === 120 ? '✅ ' : ''}2 часа`, 'Du|120'), btn(`${t.dur === 180 ? '✅ ' : ''}3 часа`, 'Du|180')],
     [btn('−', 'N|-1'), btn(`кортов нужно  ${t.needed}`, 'x'), btn('+', 'N|1')],
+    [btn(`${t.split !== false ? '✅' : '⬜️'} можно набирать по частям`, 'Sp|t')],
+    [btn('⏱ обновлять каждые', 'x'), btn(`${t.interval || 15} с`, 'Iv|next')],
     [btn('⬅️ В меню', 'V|main')]
   ]) };
 }
@@ -321,7 +323,7 @@ async function onCallback(s, cb) {
     else if (a === 'go') {
       if (s.botOn === false) return tg.answerCb(cb.id, 'Бот выключен владельцем');
       if (!s.profile.name || !s.profile.phone) { await show('profile'); return tg.answerCb(cb.id, 'Сначала имя и телефон'); }
-      if (hunt.activeBookings(s).length >= t.needed) { toast = 'Цель уже набрана — добавьте кортов'; view = 'when'; }
+      if (hunt.leftHours(s) <= 0) { toast = 'Цель уже набрана — добавьте кортов'; view = 'when'; }
       else { t.active = true; s.stats.startedAt = Date.now(); hunt.dropPhantoms(s); s.offers = []; s.seen = {}; store.log(s, `Охота запущена из Telegram: нужно ${t.needed}, ${t.timeFrom}–${t.timeTo}`); toast = 'Погнали! 🟢'; view = 'main'; }
     }
   }
@@ -341,6 +343,12 @@ async function onCallback(s, cb) {
     const h = Math.max(parseInt(t.timeFrom) + 1, Math.min(L.MAX_H, parseInt(t.timeTo) + Number(a)));
     t.timeTo = L.hourVal(h);
     if (h - parseInt(t.timeFrom) < Math.round(t.dur / 60)) t.dur = 60;
+    view = 'when';
+  }
+  else if (op === 'Sp') { t.split = t.split === false; hunt.pruneOffers(s); s.seen = {}; view = 'when'; }
+  else if (op === 'Iv') {
+    const opts = [1, 5, 10, 15, 30, 60];
+    t.interval = opts[(opts.indexOf(Number(t.interval) || 15) + 1) % opts.length];
     view = 'when';
   }
   else if (op === 'Du') { t.dur = Number(a); L.fitWindow(t); hunt.pruneOffers(s); s.seen = {}; view = 'when'; }

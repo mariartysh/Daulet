@@ -62,6 +62,7 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
 .status.live .progress{background:rgba(21,23,13,.18)}
 @keyframes aurora{0%,100%{background-position:0% 50%,100% 0%,50% 100%,30% 40%}50%{background-position:30% 20%,60% 40%,20% 70%,70% 60%}}
 .bignum{font-size:58px;font-weight:800;letter-spacing:-2.5px;line-height:1}
+.btn.hot{background:var(--lime1);color:var(--ink);font-weight:700;box-shadow:0 6px 20px rgba(166,232,18,.3)}
 .bignum small{font-size:30px;color:var(--sub);font-weight:700;letter-spacing:-1px}
 .progress{height:10px;border-radius:5px;background:var(--fill);overflow:hidden}
 .progress i{display:block;height:100%;border-radius:5px;background:linear-gradient(90deg,var(--lime2),var(--lime1));transition:width .5s;box-shadow:0 0 12px rgba(166,232,18,.7)}
@@ -115,12 +116,12 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
       <span class="pill" id="huntPill">на паузе</span>
       <span class="savemark" id="saveMark">Сохранено ✓</span>
     </div>
-    <div class="bignum" id="bigN">0<small> из 1</small></div>
+    <div class="bignum" id="bigN">0<small> из 1 ч</small></div>
     <div class="sub" id="statusSub" style="font-weight:600">поймано кортов</div>
     <div class="progress"><i id="pbar" style="width:0%"></i></div>
     <button class="cta" id="toggleBtn" onclick="toggleHunt()">Начать охоту</button>
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap" class="sub">
-      <span id="stLine">проверок 0 · находок 0</span>
+      <span id="stLine" style="line-height:1.6">проверок 0<br>находок 0<br>поиск на паузе</span>
       <span id="tgLine">Telegram: …</span>
     </div>
   </div>
@@ -165,11 +166,22 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
   </div>
 
   <div class="card">
+    <h2>Как часто проверять</h2>
+    <div class="chips" id="interval"></div>
+    <div class="sub">Чем чаще — тем выше шанс поймать. 15 секунд хватает почти всегда.</div>
+    <label style="margin-top:12px">Набор часов</label>
+    <div class="chips" id="split"></div>
+    <div class="sub">По частям — бот возьмёт нужные часы вразнобой: разное время, разные корты, крытые и открытые вперемешку.</div>
+  </div>
+
+  <div class="card">
     <h2>На кого бронируем</h2>
     <div><label>Имя и фамилия</label><input class="input" id="pName" placeholder="Азамат Серикулы" autocomplete="name"></div>
     <div><label>Телефон</label><input class="input" id="pPhone" placeholder="+7 705 123 45 67" inputmode="tel" autocomplete="tel"></div>
     <div><label>Почта <span style="font-weight:400">(необязательно)</span></label><input class="input" id="pEmail" placeholder="azamat@mail.kz" inputmode="email" autocomplete="email"></div>
     <div class="sub">Оплата на месте. Сайт данные не проверяет — главное, чтобы на ресепшене вас узнали.</div>
+    <button class="btn" id="applyBtn" onclick="applyChanges()" style="margin-top:12px">Обновить данные</button>
+    <div class="sub">План поиска меняется только после этой кнопки — случайным нажатием охоту не собьёте.</div>
   </div>
 
   <div class="card" id="bookingsCard">
@@ -190,7 +202,7 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
     </div>
   </div>
 
-  <div class="sub" style="padding:0 6px">В Telegram то же самое кнопками: /menu. Слот «завтра 00:00» — это сегодня в полночь, бот сам это учитывает.</div>
+  <div class="sub" style="padding:0 6px">Слот «завтра 00:00» — это сегодня в полночь, бот сам это учитывает.</div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -317,23 +329,39 @@ async function login(){
 }
 $('pw').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
 let pulseTimer=null;
-function startPulse(){
-  if(pulseTimer)return;
-  pulseTimer=setInterval(async()=>{ if(!TASK.active)return; try{await api('pulse');}catch(e){} refresh(); },15000);
+function startPulse(restart){
+  if(pulseTimer){ if(!restart)return; clearInterval(pulseTimer); pulseTimer=null; }
+  const gap=Math.max(3,Number(TASK.interval||15))*1000;
+  pulseTimer=setInterval(async()=>{ if(!TASK.active)return; try{await api('pulse');}catch(e){} refresh(); },gap);
 }
 function enter(){$('gate').style.display='none';document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');refresh();setInterval(refresh,8000);startPulse();}
 function toggleFold(id,foldId){const el=$(id),open=el.style.display!=='none';el.style.display=open?'none':'flex';$(foldId).classList.toggle('open',!open);}
 
 // --- автосохранение: локальный кэш + сервер, настройки не сбрасываются ---
 function cacheLocal(){stg.set('ab_task',JSON.stringify(TASK));stg.set('ab_prof',JSON.stringify(PROF));}
+let PENDING=false;
 function markDirty(){
   PROF={name:$('pName').value.trim(),phone:$('pPhone').value.trim(),email:$('pEmail').value.trim()};
   cacheLocal();
-  $('saveMark').classList.remove('show');
-  clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{
-    const r=await api('save',collect());
-    if(r.ok){$('saveMark').classList.add('show');setTimeout(()=>$('saveMark').classList.remove('show'),2200);}
-  },500);}
+  PENDING=true;
+  const b=$('applyBtn');
+  if(b){b.classList.add('hot');b.textContent='Применить изменения';}
+}
+// Пока не подтвердили — план поиска не меняется
+async function applyChanges(){
+  const r=await api('save',collect());
+  buzz(r.ok?'success':'error');
+  if(r.ok){
+    PENDING=false;
+    const b=$('applyBtn');
+    if(b){b.classList.remove('hot');b.textContent='Обновить данные';}
+    $('saveMark').classList.add('show');setTimeout(()=>$('saveMark').classList.remove('show'),2200);
+    toast(TASK.active?'Готово — ищу по новому плану':'Готово, план сохранён');
+    startPulse(true);
+    window.scrollTo({top:0,behavior:'smooth'});
+    refresh();
+  } else toast(r.error||'Не вышло сохранить');
+}
 function fitWindow(){
   const pad=n=>String(n).padStart(2,'0')+':00';
   let f=Math.max(6,Math.min(24,parseInt(TASK.timeFrom))),to=Math.max(7,Math.min(25,parseInt(TASK.timeTo))),hh=Math.max(1,Math.round(TASK.dur/60));
@@ -366,6 +394,8 @@ function renderTask(){
       if(v===0)TASK.courts=[];
       else TASK.courts=TASK.courts.includes(v)?TASK.courts.filter(x=>x!==v):[...TASK.courts,v].sort();});}
   chips($('mode'),[['confirm','Сначала спросить'],['auto','Бронить сразу']],v=>TASK.mode===v,v=>TASK.mode=v);
+  chips($('interval'),[[1,'1 с'],[5,'5 с'],[10,'10 с'],[15,'15 с'],[30,'30 с'],[60,'60 с']],v=>Number(TASK.interval||15)===v,v=>TASK.interval=v);
+  chips($('split'),[[true,'Можно по частям'],[false,'Только целым блоком']],v=>(TASK.split!==false)===v,v=>TASK.split=v);
   const HV=n=>String(n).padStart(2,'0')+':00';
   const HL=n=>n===24?'00:00 · полночь':n===25?'01:00 · ночью':HV(n);
   let of='',ot='';
@@ -448,16 +478,17 @@ async function refresh(){
   renderTask();
   $('tgLine').textContent='Telegram: '+(r.tg?('подключён ('+r.tg+')'):'ещё не подключён');
   const n=r.bookings.length,need=TASK.needed;
-  $('bigN').innerHTML=`${n}<small> из ${need}</small>`;
-  $('statusSub').textContent=n>=need&&n>0?'все корты пойманы 🏁':'поймано кортов';
-  $('pbar').style.width=Math.min(100,Math.round(n/Math.max(1,need)*100))+'%';
+  const gh=r.goalHours||need,bh=r.bookedHours||0;
+  $('bigN').innerHTML=`${bh}<small> из ${gh} ч</small>`;
+  $('statusSub').textContent=bh>=gh&&bh>0?'всё поймано 🏁':'поймано часов';
+  $('pbar').style.width=Math.min(100,Math.round(bh/Math.max(1,gh)*100))+'%';
   {const lt=r.lastTick||0,age=lt?Math.round((Date.now()-lt)/1000):null;
    let bg;
-   if(!r.task.active)bg='фон не нужен — охота на паузе';
-   else if(r.bg)bg='📡 фон работает, телефон можно закрыть';
-   else if(age!==null&&age<180)bg='📡 фон поднимается…';
-   else bg='⚠️ фон не отвечает — проверьте пингер';
-   $('stLine').textContent=`проверок ${r.stats.checks} · находок ${r.stats.found} · ${bg}`;}
+   if(!r.task.active)bg='поиск на паузе';
+   else if(r.bg)bg='фоновый поиск активен';
+   else if(age!==null&&age<180)bg='фоновый поиск запускается…';
+   else bg='фоновый поиск не отвечает';
+   $('stLine').innerHTML=`проверок ${r.stats.checks}<br>находок ${r.stats.found}<br>${bg}`;}
   const offs=r.offers||[],ob=$('offers');
   const sig=offs.map(o=>o.id).join(',');
   if(sig&&sig!==window.__offSig){window.__offSig=sig;buzz('success');}

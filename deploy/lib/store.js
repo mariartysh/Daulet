@@ -29,7 +29,9 @@ function defaults() {
       courts: [],            // номера в рамках типа ([] = любой)
       dayOffsets: [0],       // 0 сегодня · 1 завтра · 2 послезавтра
       timeFrom: '20:00', timeTo: '22:00',
-      dur: 60                // минуты: 60 | 120 | 180
+      dur: 60,               // минуты: 60 | 120 | 180
+      interval: 15,          // частота обновления расписания, сек: 1|5|10|15|30|60
+      split: true            // набирать часы по отдельности (разные корты, время и тип)
     },
     bookings: [],            // {id, recordId, hash, staffId, court, indoor, name, start, dur, price, service, cancelled}
     offers: [],              // найденные слоты, ждут «Забрать»/«Пропустить»
@@ -53,6 +55,8 @@ async function load() {
   if (s.ownerChat && !(s.chats || []).length) s.chats = [{ id: s.ownerChat, name: 'владелец' }];
   if (!s.task.dayOffsets) s.task.dayOffsets = [0];
   if (![60, 120, 180].includes(s.task.dur)) s.task.dur = 60;
+  if (![1, 5, 10, 15, 30, 60].includes(s.task.interval)) s.task.interval = 15;
+  if (s.task.split === undefined) s.task.split = true;
   if (!Array.isArray(s.offers)) s.offers = [];
   if (s.botOn === undefined) s.botOn = true;
   return s;
