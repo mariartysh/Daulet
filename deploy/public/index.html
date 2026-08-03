@@ -82,7 +82,7 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
 </style>
 </head>
 <body>
-<div id="gate">
+<div id="gate" style="display:none">
   <div class="card" style="width:min(400px,94vw);gap:16px">
     <div style="font-size:44px">🎾</div>
     <div>
@@ -196,8 +196,9 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
 const $=id=>document.getElementById(id);
 const TGA=window.Telegram&&Telegram.WebApp&&Telegram.WebApp.initData?Telegram.WebApp:null;
 let TOKEN='',THEME='auto',DEMO=false;
-let TASK={mode:'confirm',needed:1,type:'any',courts:[],dayOffsets:[0],timeFrom:'20:00',timeTo:'22:00',dur:60,active:false};
-let dirty=false,seq=0,saveTimer=null;
+const DEF={mode:'confirm',needed:1,type:'any',courts:[],dayOffsets:[0],timeFrom:'20:00',timeTo:'22:00',dur:60,active:false};
+let TASK={...DEF},PROF={name:'',phone:'',email:''};
+let saveTimer=null,adopted=false;
 const WDN=['вс','пн','вт','ср','чт','пт','сб'];
 
 // --- хранилище: Telegram CloudStorage → localStorage ---
@@ -259,10 +260,10 @@ function demoApi(action,extra){
   const a=hunt=>({ok:true,...hunt});
   switch(action){
     case 'login':return {ok:extra.password==='MeiroDictador1995',token:'demo',error:'Пароль не подошёл'};
-    case 'state':return a({task:{...TASK},profile:demo.profile,stats:demo.stats,tg:1,
+    case 'state':return a({task:{active:TASK.active,needed:TASK.needed},profile:demo.profile,stats:demo.stats,tg:1,
       bookings:demo.bookings.filter(b=>!b.cancelled).map(b=>({id:b.id,title:b.title,when:dWhen(b.start),start:b.start,price:b.price,online:b.start-5*36e5,phone:b.start-3*36e5,midnight:new Date(b.start).getHours()===0})),
       log:demo.log.map(l=>({t:l.t,m:l.m}))});
-    case 'save':if(extra.task)TASK={...TASK,...extra.task,active:TASK.active};if(extra.profile)Object.assign(demo.profile,extra.profile);return {ok:true};
+    case 'save':if(extra.profile)Object.assign(demo.profile,extra.profile);return {ok:true};
     case 'start':TASK.active=true;dLog('🟢 Охота запущена — проверяю каждые ~15 сек');return {ok:true};
     case 'stop':TASK.active=false;dLog('⏹ Охота остановлена');return {ok:true};
     case 'cancelBooking':{const b=demo.bookings.find(x=>x.id===extra.id);if(b){b.cancelled=true;dLog('↩️ Отменил '+b.title+' — слот снова свободен');}return {ok:true};}
@@ -294,12 +295,16 @@ $('pw').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
 function enter(){$('gate').style.display='none';document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');refresh();setInterval(refresh,8000);}
 function toggleFold(id,foldId){const el=$(id),open=el.style.display!=='none';el.style.display=open?'none':'flex';$(foldId).classList.toggle('open',!open);}
 
-// --- автосохранение: правки не теряются ---
-function markDirty(){dirty=true;seq++;const my=seq;$('saveMark').classList.remove('show');
+// --- автосохранение: локальный кэш + сервер, настройки не сбрасываются ---
+function cacheLocal(){stg.set('ab_task',JSON.stringify(TASK));stg.set('ab_prof',JSON.stringify(PROF));}
+function markDirty(){
+  PROF={name:$('pName').value.trim(),phone:$('pPhone').value.trim(),email:$('pEmail').value.trim()};
+  cacheLocal();
+  $('saveMark').classList.remove('show');
   clearTimeout(saveTimer);saveTimer=setTimeout(async()=>{
     const r=await api('save',collect());
-    if(r.ok&&my===seq){dirty=false;$('saveMark').classList.add('show');setTimeout(()=>$('saveMark').classList.remove('show'),2200);}
-  },600);}
+    if(r.ok){$('saveMark').classList.add('show');setTimeout(()=>$('saveMark').classList.remove('show'),2200);}
+  },500);}
 function mutate(fn){fn();renderTask();markDirty();}
 
 function chips(el,items,get,set){
@@ -360,9 +365,8 @@ $('pPhone').addEventListener('focus',()=>{if(!$('pPhone').value)$('pPhone').valu
 $('pName').addEventListener('input',markDirty);
 $('pEmail').addEventListener('input',markDirty);
 
-function collect(){
-  return {task:{...TASK},profile:{name:$('pName').value.trim(),phone:$('pPhone').value.trim(),email:$('pEmail').value.trim()}};
-}
+function collect(){return {task:{...TASK},profile:{...PROF}};}
+function fillProfile(){$('pName').value=PROF.name||'';$('pPhone').value=PROF.phone||'';maskPhone();$('pEmail').value=PROF.email||'';}
 async function toggleHunt(){
   if(TASK.active){await api('stop');TASK.active=false;renderTask();toast('Остановил. Продолжим, когда скажете');}
   else{
@@ -384,19 +388,19 @@ async function cancelBk(id){if(!confirm('Точно отменить бронь?
 function left(ms){const d=ms-Date.now();if(d<=0)return null;const h=Math.floor(d/36e5),m=Math.floor(d%36e5/6e4);return h?`${h}ч ${String(m).padStart(2,'0')}м`:`${m} мин`;}
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-function inputsBusy(){const a=document.activeElement;return a&&/^(INPUT|SELECT)$/.test(a.tagName);}
 async function refresh(){
   const r=await api('state');
   if(!r.ok)return;
-  if(!dirty&&!inputsBusy()){
-    TASK=Object.assign(TASK,r.task);
-    renderTask();
-    $('pName').value=r.profile.name||'';
-    $('pPhone').value=r.profile.phone||'';maskPhone();
-    $('pEmail').value=r.profile.email||'';
-  }else{renderTask();}
+  if(!adopted){ // первый заход без локальных настроек — берём серверные
+    adopted=true;
+    if(!localStorage.getItem('ab_task')&&r.task){TASK={...TASK,...r.task};cacheLocal();}
+    if(!localStorage.getItem('ab_prof')&&r.profile&&(r.profile.name||r.profile.phone)){PROF={...PROF,...r.profile};fillProfile();cacheLocal();}
+    else api('save',collect()); // сервер догоняет мой последний выбор
+  }
+  TASK.active=!!(r.task&&r.task.active);
+  renderTask();
   $('tgLine').textContent='Telegram: '+(r.tg?('подключён ('+r.tg+')'):'ещё не подключён');
-  const n=r.bookings.length,need=(!dirty?r.task.needed:TASK.needed);
+  const n=r.bookings.length,need=TASK.needed;
   $('bigN').innerHTML=`${n}<small> из ${need}</small>`;
   $('statusSub').textContent=n>=need&&n>0?'все корты пойманы 🏁':'поймано кортов';
   $('pbar').style.width=Math.min(100,Math.round(n/Math.max(1,need)*100))+'%';
@@ -425,9 +429,12 @@ async function refresh(){
 
 (async()=>{
   THEME=(await stg.get('ab_theme'))||'auto';applyTheme();
+  try{const t=JSON.parse(await stg.get('ab_task')||'null');if(t)TASK={...DEF,...t};}catch(e){}
+  try{const p=JSON.parse(await stg.get('ab_prof')||'null');if(p)PROF={...PROF,...p};}catch(e){}
+  renderTask();fillProfile();
   TOKEN=(await stg.get('ab_token'))||'';
-  if(TOKEN){const r=await api('state');if(r.ok){enter();return;}TOKEN='';}
-  applyTheme();
+  if(TOKEN){const r=await api('state');if(r.ok){enter();return;}TOKEN='';stg.set('ab_token','');}
+  $('gate').style.display='flex';
 })();
 </script>
 </body>
