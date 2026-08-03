@@ -1,98 +1,147 @@
-// Фоновая охота. Три независимых движка, чтобы поиск шёл при закрытом телефоне:
-//  1) ЦЕПОЧКА: каждый вызов, отработав ~45 сек, сам дёргает следующий — бот живёт сам,
-//     пока задание активно. Ничего внешнего не нужно.
-//  2) ПИНГЕР (cron-job.org, раз в минуту) — страховка, если цепочка порвалась.
-//  3) Vercel Cron раз в день — ежедневная сводка + перезапуск цепочки.
+// Фоновая охота. Работает на сервере и не зависит от Telegram и панели.
+// Стоп только по: цель набрана · охота отменена · 12 часов поиска.
+//
+// Что вызывает этот файл:
+//  1) ЗВЕНО ЦЕПОЧКИ (?chain=1&strand=a|b) — работает ~44 сек и передаёт эстафету дальше,
+//     дождавшись подтверждения. Ветка A ищет, ветка B страхует и подхватывает.
+//  2) ПИНГЕР раз в минуту (?key=…) — поднимает мёртвые ветки и, если давно не было
+//     проверки, делает одну сам. Гарантированный минимум: 1 проверка в минуту.
+//  3) Vercel Cron раз в сутки (?job=summary) — сводка + подъём веток.
 const store = require('../lib/store');
 const hunt = require('../lib/hunt');
+const chain = require('../lib/chain');
 const L = require('../lib/logic');
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-const CHAIN_TTL = 75e3;           // цепочка жива, если звено отметилось меньше 75 сек назад
+const WORK_MS = 44000;     // работа одного звена (maxDuration 60: остаток — на эстафету)
+const WATCH_MS = 10000;    // шаг стража
+const TAKEOVER = 30000;    // A молчит столько — страж начинает искать сам
+const FLOOR_MS = 20000;    // пингер делает свою проверку, если последней не было столько
 
-function selfUrl(req) {
-  const env = (process.env.APP_URL || '').replace(/\/+$/, '');
-  if (env) return env;
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  return host ? `https://${host}` : null;
-}
-
-// Передать эстафету следующему звену.
-// Ждём, пока запрос ГАРАНТИРОВАННО уйдёт (иначе Vercel заморозит инстанс раньше),
-// затем обрываем соединение — принимающий вызов продолжает жить сам по себе.
-async function passBaton(req) {
-  const base = selfUrl(req);
-  if (!base || !process.env.TICK_KEY) return false;
-  const url = `${base}/api/tick?key=${encodeURIComponent(process.env.TICK_KEY)}&chain=1&n=${Date.now()}`;
-  const ac = new AbortController();
-  const started = fetch(url, { method: 'GET', headers: { 'x-chain': '1' }, signal: ac.signal }).catch(() => {});
-  await Promise.race([started, sleep(2500)]);   // 2.5 сек хватает, чтобы Vercel принял запрос
-  try { ac.abort(); } catch (e) {}
-  return true;
-}
-
-module.exports = async (req, res) => {
-  res.setHeader('Cache-Control', 'no-store');
+const authOk = req => {
   const q = req.query || {};
-  const okKey = q.key && q.key === process.env.TICK_KEY;
-  const okCron = process.env.CRON_SECRET && (req.headers.authorization || '') === `Bearer ${process.env.CRON_SECRET}`;
-  if (!okKey && !okCron) return res.status(401).json({ ok: false, error: 'bad key' });
+  return !!((q.key && q.key === process.env.TICK_KEY)
+    || (process.env.CRON_SECRET && (req.headers.authorization || '') === `Bearer ${process.env.CRON_SECRET}`));
+};
 
+// Охота ещё идёт? (учитывает цель, 12 часов и общий выключатель). Мутации сохраняет сам.
+async function running(s) {
+  if (s.botOn === false || !s.task.active) return false;
+  const stopped = await hunt.autoStop(s);
+  if (stopped) await store.save(s);
+  return !stopped;
+}
+
+async function sweepOnce(s) {
+  s.lastTick = Date.now();
+  s.chainAt = Date.now();
+  let r;
+  try { r = await hunt.sweep(s); }
+  catch (e) { s.stats.errors++; store.log(s, 'Сбой прохода: ' + e.message, 1); r = { error: e.message }; }
+  await hunt.noteResult(s, r);
+  await store.save(s);
+  return r;
+}
+
+// ---------- звено ветки ----------
+async function link(req, res, strand, run, delaySec) {
+  const before = await chain.beats().catch(() => ({}));
+  await chain.beat(strand, run);
   let s = await store.load();
-
-  // --- ежедневная сводка (Vercel Cron) ---
-  if (q.job === 'summary') {
-    await hunt.sendAll(s, '📊 <b>Сводка за день</b>\n' + hunt.statusText(s));
-    s.lastTick = Date.now();
+  if (!(await running(s))) { await chain.drop(); return res.status(200).json({ ok: true, strand, idle: true }); }
+  if (!chain.alive(before, strand)) {
+    store.log(s, `Фоновый поиск запущен (ветка ${strand.toUpperCase()})`);
     await store.save(s);
-    if (s.task.active && s.botOn !== false) passBaton(req);   // заодно поднимаем цепочку
-    return res.status(200).json({ ok: true, job: 'summary' });
+  }
+  if (delaySec) await chain.sleep(delaySec * 1000);
+
+  const until = Date.now() + WORK_MS;
+  let sweeps = 0, stop = '', last = null, respawn = 0;
+  while (Date.now() < until) {
+    const b = await chain.beats().catch(() => ({}));
+    if (b[strand] && b[strand].run && b[strand].run !== run) { stop = 'taken'; break; }
+    await chain.beat(strand, run);
+    s = await store.load();
+    if (!(await running(s))) { stop = 'done'; break; }
+
+    const workA = strand === 'a';
+    const standIn = !workA && Date.now() - chain.at(b, 'a') > TAKEOVER;
+    if (workA || standIn) { last = await sweepOnce(s); sweeps++; }
+    if (standIn && Date.now() - respawn > 60e3) {   // рабочая ветка молчит — поднимаем
+      respawn = Date.now();
+      store.log(s, 'Рабочая ветка молчит — поднимаю её', 1);
+      await store.save(s);
+      await chain.spawn(req, 'a', { confirm: false });
+    }
+    const gap = workA ? hunt.pace(s) : WATCH_MS;
+    if (Date.now() + gap > until) break;
+    await chain.sleep(gap);
   }
 
-  const isChain = q.chain === '1';
-  const now = Date.now();
-  const chainAlive = s.chainAt && now - s.chainAt < CHAIN_TTL;
-
-  // Внешний пингер не мешает живой цепочке — только следит и поднимает упавшую
-  if (!isChain && chainAlive) {
-    return res.status(200).json({ ok: true, chain: 'alive', lastTick: s.lastTick || 0 });
+  // ---------- эстафета ----------
+  let handed = false, neighbour = false;
+  if (stop === 'done') { await chain.drop(); }
+  else if (stop !== 'taken') {
+    const fresh = await store.load();
+    if (await running(fresh)) {
+      handed = await chain.spawn(req, strand, { confirm: true });
+      if (!handed) {
+        const f = await store.load();
+        store.log(f, `Ветка ${strand.toUpperCase()} не смогла передать эстафету — поднимет пингер или сосед`, 1);
+        await store.save(f);
+      }
+      const other = strand === 'a' ? 'b' : 'a';
+      const b2 = await chain.beats().catch(() => ({}));
+      if (!chain.alive(b2, other)) neighbour = await chain.spawn(req, other, { confirm: false, delay: other === 'b' ? 20 : 0 });
+    } else await chain.drop();
   }
+  return res.status(200).json({ ok: true, at: L.fmt(Date.now()), strand, run, sweeps, stop: stop || 'budget', handed, neighbour, last });
+}
 
-  if (s.botOn === false || !s.task.active) {
-    s.chainAt = 0;                       // цепочку не тянем, но напоминания об отмене нужны
-    s.lastTick = now;
+// ---------- пингер: сторож снаружи ----------
+async function guard(req, res) {
+  const s = await store.load();
+  if (!(await running(s))) {
+    await chain.drop();
     await hunt.reminders(s);
     await store.save(s);
     return res.status(200).json({ ok: true, active: false });
   }
+  const b = await chain.beats().catch(() => ({}));
+  const wasAlive = chain.aliveList(b);
+  let swept = null;
+  if (Date.now() - (s.lastTick || 0) > FLOOR_MS) swept = await sweepOnce(s);   // минимум раз в минуту
+  const started = await chain.revive(req, { confirm: true });
+  return res.status(200).json({
+    ok: true, at: L.fmt(Date.now()), alive: wasAlive, started,
+    swept: !!swept, checks: s.stats.checks, found: s.stats.found
+  });
+}
 
-  // --- рабочее звено: ~45 сек проходов каждые 15 сек ---
-  const spacing = Math.max(1, Math.min(60, Number(s.task.interval || process.env.POLL_INTERVAL_SEC || 15))) * 1000;
-  const budget = 45000;                                  // ~45 сек работы, остальное на эстафету
-  const sweeps = Math.max(1, Math.min(45, Math.floor(budget / spacing)));
-  const results = [];
-  const until = Date.now() + budget;
+module.exports = async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!authOk(req)) return res.status(401).json({ ok: false, error: 'bad key' });
+  const q = req.query || {};
 
-  for (let i = 0; i < sweeps && Date.now() < until; i++) {
-    s = await store.load();                        // свежее состояние: могли остановить из бота
-    if (s.botOn === false || !s.task.active) { results.push({ stopped: true }); break; }
-    s.chainAt = Date.now();
+  if (q.job === 'summary') {
+    const s = await store.load();
+    await hunt.sendAll(s, '📊 <b>Сводка за день</b>\n' + hunt.statusText(s));
     s.lastTick = Date.now();
-    try { results.push(await hunt.sweep(s)); }
-    catch (e) { s.stats.errors++; store.log(s, 'Сбой прохода: ' + e.message, 1); results.push({ error: e.message }); }
     await store.save(s);
-    if (i < sweeps - 1) await sleep(spacing);
+    if (s.task.active && s.botOn !== false) await chain.revive(req, { confirm: false });
+    return res.status(200).json({ ok: true, job: 'summary' });
   }
 
-  // --- эстафета следующему звену ---
-  const fresh = await store.load();
-  let handed = false;
-  if (fresh.task.active && fresh.botOn !== false) {
-    fresh.chainAt = Date.now();
-    await store.save(fresh);
-    handed = await passBaton(req);
-    if (!handed) { fresh.chainAt = 0; await store.save(fresh); }
-  } else { fresh.chainAt = 0; await store.save(fresh); }
+  if (q.chain === '1') {
+    const strand = q.strand === 'b' ? 'b' : 'a';
+    const run = String(q.run || '').slice(0, 12) || Math.random().toString(36).slice(2, 9);
+    const delay = Math.max(0, Math.min(30, Number(q.delay) || 0));
+    try { return await link(req, res, strand, run, delay); }
+    catch (e) {
+      try { const s = await store.load(); store.log(s, `Ветка ${strand.toUpperCase()} упала: ${e.message}`, 1); await store.save(s); } catch (_) {}
+      return res.status(200).json({ ok: false, strand, error: e.message });
+    }
+  }
 
-  return res.status(200).json({ ok: true, at: L.fmt(Date.now()), chain: isChain ? 'link' : 'started', handed, sweeps: results.length, results: results.slice(-3) });
+  try { return await guard(req, res); }
+  catch (e) { return res.status(200).json({ ok: false, error: e.message }); }
 };

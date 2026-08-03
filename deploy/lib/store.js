@@ -2,6 +2,8 @@
 const URL_ = process.env.UPSTASH_REDIS_REST_URL, TOK = process.env.UPSTASH_REDIS_REST_TOKEN;
 let mem = null;
 const KEY = 'autobook:state';
+const HB = k => `autobook:hb:${k}`;      // сердцебиение фоновых веток — отдельными ключами, чтобы не трогать состояние
+let memHb = {};
 
 async function cmd(arr) {
   const r = await fetch(URL_, {
@@ -29,8 +31,8 @@ function defaults() {
       courts: [],            // номера в рамках типа ([] = любой)
       dayOffsets: [0],       // 0 сегодня · 1 завтра · 2 послезавтра
       timeFrom: '20:00', timeTo: '22:00',
-      dur: 60,               // минуты: 60 | 120 | 180
-      interval: 15,          // частота обновления расписания, сек: 1|5|10|15|30|60
+      dur: 60,               // минуты: 60 | 120
+      interval: 10,          // частота обновления расписания, сек: 10|15|30|60
       split: true            // набирать часы по отдельности (разные корты, время и тип)
     },
     bookings: [],            // {id, recordId, hash, staffId, court, indoor, name, start, dur, price, service, cancelled}
@@ -54,8 +56,8 @@ async function load() {
   // миграция со старых версий
   if (s.ownerChat && !(s.chats || []).length) s.chats = [{ id: s.ownerChat, name: 'владелец' }];
   if (!s.task.dayOffsets) s.task.dayOffsets = [0];
-  if (![60, 120, 180].includes(s.task.dur)) s.task.dur = 60;
-  if (![1, 5, 10, 15, 30, 60].includes(s.task.interval)) s.task.interval = 15;
+  if (![60, 120].includes(s.task.dur)) s.task.dur = s.task.dur > 120 ? 120 : 60;
+  if (![10, 15, 30, 60].includes(Number(s.task.interval))) s.task.interval = 10;
   if (s.task.split === undefined) s.task.split = true;
   if (!Array.isArray(s.offers)) s.offers = [];
   if (s.botOn === undefined) s.botOn = true;
@@ -75,4 +77,21 @@ function log(s, m, warn) {
   s.log.unshift({ t: Date.now(), m: String(m).slice(0, 400), w: warn ? 1 : 0 });
 }
 
-module.exports = { load, save, log, defaults };
+// ---------- сердцебиение фоновых веток ----------
+async function setBeat(k, run, ttlSec) {
+  if (!URL_ || !TOK) { memHb[k] = { at: Date.now(), run }; return; }
+  await cmd(['SET', HB(k), JSON.stringify({ at: Date.now(), run }), 'EX', String(ttlSec || 120)]);
+}
+async function beats() {
+  if (!URL_ || !TOK) return { a: memHb.a || null, b: memHb.b || null };
+  const r = await cmd(['MGET', HB('a'), HB('b')]);
+  const parse = x => { try { return x ? JSON.parse(x) : null; } catch (e) { return null; } };
+  return { a: parse(r && r[0]), b: parse(r && r[1]) };
+}
+async function clearBeats() {
+  memHb = {};
+  if (!URL_ || !TOK) return;
+  await cmd(['DEL', HB('a'), HB('b')]);
+}
+
+module.exports = { load, save, log, defaults, setBeat, beats, clearBeats };

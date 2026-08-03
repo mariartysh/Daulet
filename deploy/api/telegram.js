@@ -1,22 +1,13 @@
 // Telegram-бот: весь путь на кнопках. Меню правится на месте (editMessageText).
 const store = require('../lib/store');
 const hunt = require('../lib/hunt');
+const chain = require('../lib/chain');
 const tg = require('../lib/tg');
 const L = require('../lib/logic');
 
 const ADMIN = (process.env.ADMIN_USERNAME || 'gaucho_bro').toLowerCase().replace('@', '');
 const CHAIN_TTL = 100e3;
 
-// Поднять фоновую цепочку, если порвалась
-function reviveChain(s) {
-  if (!s.task.active || s.botOn === false || !process.env.TICK_KEY) return false;
-  if (s.chainAt && Date.now() - s.chainAt < CHAIN_TTL) return false;
-  const base = (process.env.APP_URL || '').replace(/\/+$/, '');
-  if (!base) return false;
-  s.chainAt = Date.now();
-  try { fetch(base + '/api/tick?key=' + encodeURIComponent(process.env.TICK_KEY) + '&chain=1').catch(() => {}); } catch (e) {}
-  return true;
-}
 const bgAlive = s => !!(s.chainAt && Date.now() - s.chainAt < CHAIN_TTL);
 const APP_URL = (process.env.APP_URL || '').trim();
 const DAY = ['Сегодня', 'Завтра', 'Послезавтра'];
@@ -53,8 +44,11 @@ module.exports = async (req, res) => {
   } catch (e) {
     store.log(s, 'Сбой в Telegram: ' + e.message, 1);
   }
-  reviveChain(s);
   await store.save(s);
+  if (s.task.active && s.botOn !== false) {
+    const b = await chain.beats().catch(() => ({}));
+    if (!chain.aliveList(b).length) await chain.revive(req, { confirm: false });
+  }
   return res.status(200).json({ ok: true });
 };
 
@@ -71,8 +65,8 @@ function vMain(s, admin) {
   const days = (t.dayOffsets || [0]).map(o => DAY[o].toLowerCase()).join(', ');
   const off = s.botOn === false ? '🔴 <b>Бот выключен владельцем</b>\n\n' : '';
   const text = `🎾 <b>Court Hunter</b>\n\n` + off + (t.active
-    ? `🟢 <b>Ловлю прямо сейчас</b>\nПлан: ${days}, ${L.hourLabel(parseInt(t.timeFrom))}–${L.hourLabel(parseInt(t.timeTo))}, ${Math.round(t.dur / 60)} ч\nПоймано: ${act} из ${t.needed}\n\n${bgAlive(s) ? '📡 Фоновый поиск работает — телефон можно закрыть.' : '⏳ Поднимаю фоновый поиск…'}`
-    : `⚪ <b>Сплю</b>\nПлан: ${days}, ${t.timeFrom}–${t.timeTo}, ${Math.round(t.dur / 60)} ч · нужно кортов: ${t.needed}\nПоймано: ${act} из ${t.needed}\n\nПроверьте план и жмите «Начать охоту».`);
+    ? `🟢 <b>Ловлю прямо сейчас</b>\nПлан: ${days}, ${L.hourLabel(parseInt(t.timeFrom))}–${L.hourLabel(parseInt(t.timeTo))}, ${Math.round(t.dur / 60)} ч\nПоймано: ${hunt.bookedHours(s)} из ${hunt.goalHours(s)} ч · проверяю каждые ${t.interval || 10} с\n\n${bgAlive(s) ? '📡 Фоновый поиск работает — Telegram можно закрыть.' : '⏳ Поднимаю фоновый поиск…'}`
+    : `⚪ <b>Сплю</b>\nПлан: ${days}, ${t.timeFrom}–${t.timeTo}, ${Math.round(t.dur / 60)} ч · кортов на каждый день: ${t.needed}\nПоймано: ${hunt.bookedHours(s)} из ${hunt.goalHours(s)} ч\n\nПроверьте план и жмите «Начать охоту».`);
   const rows = [
     [t.active ? btn('⏹ Остановить охоту', 'M|stop') : btn('▶️ Начать охоту', 'M|go')],
     [btn('🗓 Когда', 'V|when'), btn('🎛 Фильтр', 'V|filters')],
@@ -88,7 +82,7 @@ function vHelp(s) {
   return { text:
 `❓ <b>Как это работает</b>
 
-Корты в Даулете разбирают за минуты. Я обновляю расписание каждые ~15 секунд и хватаю то, что подходит под ваш план.
+Корты в Даулете разбирают за минуты. Я обновляю расписание каждые ${s.task.interval || 10} секунд и хватаю то, что подходит под ваш план.
 
 <b>1. Когда</b> — день (сегодня / завтра / послезавтра — дальше сайт не открывает), окно времени и длительность.
 <b>2. Фильтр</b> — крытый или открытый, конкретный номер, и главное: бронировать сразу или сначала спросить.
@@ -104,7 +98,9 @@ function vHelp(s) {
 
 <b>Хитрость с полуночью:</b> слот «завтра 00:00» на сайте — это сегодня ночью. Я подписываю такие слоты 🌙, чтобы вы не приехали не в тот день.
 
-Набрали нужное количество кортов — охота выключается сама.`,
+<b>Сколько кортов ловлю:</b> столько на КАЖДЫЙ выбранный день. Выбрали три дня и «1 корт» — поймал на сегодня и ищу дальше на завтра и послезавтра.
+
+Искать перестаю только в трёх случаях: всё нужное поймано · вы нажали «Остановить» · прошло 12 часов поиска. Telegram можно закрывать — я ищу на сервере.`,
   ...kb([[btn('⬅️ В меню', 'V|main')]]) };
 }
 
@@ -112,12 +108,12 @@ function vWhen(s) {
   const t = s.task;
   const dayRow = [0, 1, 2].map(o => btn(`${(t.dayOffsets || []).includes(o) ? '✅ ' : ''}${DAY[o]}`, `Wd|${o}`));
   const night = parseInt(t.timeTo) > 23 ? '\n🌙 Ночные слоты включены: на сайте это «завтра 00:00/01:00», играете этой же ночью.' : '';
-  return { text: `🗓 <b>Когда играем</b>\n\nСейчас ловлю: ${(t.dayOffsets || [0]).map(o => DAY[o].toLowerCase()).join(', ')}, с ${L.hourLabel(parseInt(t.timeFrom))} до ${L.hourLabel(parseInt(t.timeTo))}, по ${Math.round(t.dur / 60)} ч. Кортов нужно: ${t.needed}.${night}\n\nЖмите кнопки — всё сохраняется сразу.`, ...kb([
+  return { text: `🗓 <b>Когда играем</b>\n\nСейчас ловлю: ${(t.dayOffsets || [0]).map(o => DAY[o].toLowerCase()).join(', ')}, с ${L.hourLabel(parseInt(t.timeFrom))} до ${L.hourLabel(parseInt(t.timeTo))}, по ${Math.round(t.dur / 60)} ч. Кортов на каждый день: ${t.needed} (всего ${hunt.goalHours(s)} ч).${night}\n\nЖмите кнопки — всё сохраняется сразу.`, ...kb([
     dayRow,
     [btn('−', 'Wf|-1'), btn(`начало  ${L.hourLabel(parseInt(t.timeFrom))}`, 'x'), btn('+', 'Wf|1')],
     [btn('−', 'Wt|-1'), btn(`конец  ${L.hourLabel(parseInt(t.timeTo))}`, 'x'), btn('+', 'Wt|1')],
-    [btn(`${t.dur === 60 ? '✅ ' : ''}1 час`, 'Du|60'), btn(`${t.dur === 120 ? '✅ ' : ''}2 часа`, 'Du|120'), btn(`${t.dur === 180 ? '✅ ' : ''}3 часа`, 'Du|180')],
-    [btn('−', 'N|-1'), btn(`кортов нужно  ${t.needed}`, 'x'), btn('+', 'N|1')],
+    [btn(`${t.dur === 60 ? '✅ ' : ''}1 час`, 'Du|60'), btn(`${t.dur === 120 ? '✅ ' : ''}2 часа`, 'Du|120')],
+    [btn('−', 'N|-1'), btn(`кортов в день  ${t.needed}`, 'x'), btn('+', 'N|1')],
     [btn(`${t.split !== false ? '✅' : '⬜️'} можно набирать по частям`, 'Sp|t')],
     [btn('⏱ обновлять каждые', 'x'), btn(`${t.interval || 15} с`, 'Iv|next')],
     [btn('⬅️ В меню', 'V|main')]
@@ -323,8 +319,14 @@ async function onCallback(s, cb) {
     else if (a === 'go') {
       if (s.botOn === false) return tg.answerCb(cb.id, 'Бот выключен владельцем');
       if (!s.profile.name || !s.profile.phone) { await show('profile'); return tg.answerCb(cb.id, 'Сначала имя и телефон'); }
-      if (hunt.leftHours(s) <= 0) { toast = 'Цель уже набрана — добавьте кортов'; view = 'when'; }
-      else { t.active = true; s.stats.startedAt = Date.now(); hunt.dropPhantoms(s); s.offers = []; s.seen = {}; store.log(s, `Охота запущена из Telegram: нужно ${t.needed}, ${t.timeFrom}–${t.timeTo}`); toast = 'Погнали! 🟢'; view = 'main'; }
+      if (hunt.leftHours(s) <= 0) { toast = 'Цель уже набрана — добавьте дней или кортов'; view = 'when'; }
+      else {
+        t.active = true; s.stats.startedAt = Date.now(); s.bo = { fails: 0 };
+        hunt.dropPhantoms(s); s.offers = []; s.seen = {};
+        store.log(s, `Охота запущена из Telegram: проверка каждые ${t.interval || 10} с, нужно ${t.needed} на каждый день, ${t.timeFrom}–${t.timeTo}`);
+        await hunt.sendAll(s, `🟢 <b>Охота запущена</b>\nПроверяю расписание каждые ${t.interval || 10} с — Telegram можно закрыть, ищу на сервере.\n\n` + hunt.statusText(s));
+        toast = `Погнали! Каждые ${t.interval || 10} с 🟢`; view = 'main';
+      }
     }
   }
   else if (op === 'Wd') {
@@ -347,8 +349,8 @@ async function onCallback(s, cb) {
   }
   else if (op === 'Sp') { t.split = t.split === false; hunt.pruneOffers(s); s.seen = {}; view = 'when'; }
   else if (op === 'Iv') {
-    const opts = [1, 5, 10, 15, 30, 60];
-    t.interval = opts[(opts.indexOf(Number(t.interval) || 15) + 1) % opts.length];
+    const opts = [10, 15, 30, 60];
+    t.interval = opts[(opts.indexOf(Number(t.interval) || 10) + 1) % opts.length];
     view = 'when';
   }
   else if (op === 'Du') { t.dur = Number(a); L.fitWindow(t); hunt.pruneOffers(s); s.seen = {}; view = 'when'; }

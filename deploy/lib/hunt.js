@@ -12,6 +12,7 @@ const { log } = require('./store');
 const CACHE_TTL = 3 * 3600e3;
 const CACHE_VER = 9;   // ↑ при изменении логики разбора кортов — сбрасывает старый кэш
 const COMBO_CAP = Number(process.env.COMBO_CAP || 10);
+const HUNT_TTL = Number(process.env.HUNT_TTL_H || 12) * 3600e3;   // 12 часов поиска — и стоп
 
 // ---------- обнаружение кортов ----------
 async function ensureTargets(s) {
@@ -75,9 +76,75 @@ const pickService = (services, durMin, indoor) => {
 };
 
 const activeBookings = s => s.bookings.filter(b => !b.cancelled && b.start > Date.now() - 3600e3);
-const goalHours = s => Math.max(1, s.task.needed) * Math.max(1, Math.round((s.task.dur || 60) / 60));
-const bookedHours = s => activeBookings(s).reduce((n, b) => n + Math.max(1, Math.round((b.dur || 60) / 60)), 0);
-const leftHours = s => goalHours(s) - bookedHours(s);
+const bookHours = b => Math.max(1, Math.round((b.dur || 60) / 60));
+const perDayHours = s => Math.max(1, s.task.needed) * Math.max(1, Math.round((s.task.dur || 60) / 60));
+
+// К какому дню плана относится слот: ночные 00:00/01:00 — это вечер предыдущего дня
+function planDay(t, startMs) {
+  const mins = L.parseHM(L.hm(startMs));
+  const fromM = L.parseHM(t.timeFrom || '20:00'), toM = L.parseHM(t.timeTo || '22:00');
+  if (mins < fromM && mins + 1440 <= toM) return L.localISODate(startMs - 86400e3);
+  return L.localISODate(startMs);
+}
+
+// Цель считается ПО КАЖДОМУ выбранному дню: выбрали 3 дня × «нужно 1» = минимум 3 брони,
+// поймали на сегодня — ищу дальше на завтра и послезавтра.
+function dayPlan(s, nowMs) {
+  const t = s.task, now = nowMs || Date.now();
+  const need = perDayHours(s);
+  const days = L.taskDates(t, now).filter(d => !d.carry).map(d => ({ iso: d.iso, need, got: 0 }));
+  for (const b of activeBookings(s)) {
+    const d = days.find(x => x.iso === planDay(t, b.start));
+    if (d) d.got += bookHours(b);
+  }
+  return days;
+}
+const goalHours = s => dayPlan(s).reduce((n, d) => n + d.need, 0);
+const bookedHours = s => dayPlan(s).reduce((n, d) => n + Math.min(d.need, d.got), 0);
+const leftHours = s => dayPlan(s).reduce((n, d) => n + Math.max(0, d.need - d.got), 0);
+const leftForDay = (s, iso) => {
+  const d = dayPlan(s).find(x => x.iso === iso);
+  return d ? Math.max(0, d.need - d.got) : 0;
+};
+
+// Фактическая пауза между проверками: выбранная частота + автоторможение, если сайт сбоит
+function pace(s) {
+  const base = Math.max(5, Math.min(60, Number((s.task && s.task.interval) || 10))) * 1000;
+  const f = (s.bo && s.bo.fails) || 0;
+  return f >= 6 ? 60000 : f >= 3 ? 30000 : base;
+}
+
+async function noteResult(s, r) {
+  s.bo = s.bo || { fails: 0 };
+  if (r && r.apiOk) {
+    if (s.bo.fails >= 3) log(s, 'Сайт снова отвечает — вернулся к обычной частоте');
+    s.bo.fails = 0;
+    return;
+  }
+  if (!r || (!r.apiFail && !r.error)) return;
+  s.bo.fails++;
+  if (s.bo.fails === 3) {
+    log(s, 'Сайт кортов не отвечает — притормозил до 30 с', 1);
+    await notifyError(s, 'Сайт кортов не отвечает. Продолжаю пробовать, пока реже (раз в 30 с) — как ответит, вернусь к обычной частоте.');
+  }
+  if (s.bo.fails === 6) log(s, 'Сайт всё ещё молчит — проверяю раз в 60 с', 1);
+}
+
+const huntAge = s => s.stats.startedAt ? Date.now() - s.stats.startedAt : 0;
+const expired = s => !!(s.task.active && s.stats.startedAt && huntAge(s) >= HUNT_TTL);
+
+// Единственные причины остановки: цель набрана · 12 часов поиска · отмена вручную
+async function autoStop(s) {
+  if (!s.task.active) return true;
+  if (leftHours(s) <= 0) { await finishTask(s); return true; }
+  if (expired(s)) {
+    s.task.active = false;
+    log(s, 'Прошло 12 часов поиска — охота остановлена', 1);
+    await sendAll(s, '⌛ <b>12 часов поиска — останавливаюсь</b>\nПод ваш план ничего не освободилось. Запустите охоту снова или ослабьте фильтр: добавьте дни, расширьте окно, разрешите любой тип корта.');
+    return true;
+  }
+  return false;
+}
 
 function courtTitle(meta, name) {
   if (meta && meta.court != null) {
@@ -87,8 +154,20 @@ function courtTitle(meta, name) {
   return name || 'Корт';
 }
 
+// Сообщение во все подключённые чаты. Никогда не бросает: упавшая отправка не должна ломать охоту.
 async function sendAll(s, text, extra) {
-  for (const c of (s.chats || [])) await tg.send(c.id || c, text, extra || {});
+  const chats = s.chats || [];
+  if (!chats.length) { log(s, 'Telegram не подключён — сообщение отправлять некому', 1); return { ok: 0, fail: 0 }; }
+  let ok = 0, fail = 0;
+  for (const c of chats) {
+    const id = c.id || c;
+    let j;
+    try { j = await tg.send(id, text, extra || {}); }
+    catch (e) { j = { ok: false, description: e.message }; }
+    if (j && j.ok) ok++;
+    else { fail++; log(s, `Сообщение в Telegram не ушло (${c.name || id}): ${(j && j.description) || '?'}`, 1); }
+  }
+  return { ok, fail };
 }
 
 // ---------- один проход охоты ----------
@@ -116,6 +195,8 @@ async function sweep(s) {
   s.rot = (start + batch.length) % combos.length;
 
   const wantHours = Math.max(1, Math.round(t.dur / 60));
+  const leftBy = {};                                  // сколько часов ещё нужно по каждому дню плана
+  for (const d of dayPlan(s, now)) leftBy[d.iso] = Math.max(0, d.need - d.got);
   const foundNew = [];
   let apiOk = 0, apiFail = 0;
   for (const { d, c } of batch) {
@@ -137,11 +218,14 @@ async function sweep(s) {
 
     for (const startMs of free) {
       if (!L.slotMatches(t, d, startMs, now)) continue;
+      const pd = planDay(t, startMs);
+      if (!(leftBy[pd] > 0)) continue;                 // на этот день нужное уже поймано
       // сколько часов подряд свободно от этого старта
       let run = 1;
       while (run < wantHours && freeSet.has(startMs + run * 3600e3)) run++;
       // целый блок — идеально; иначе один час, если разрешено набирать по частям
-      const takeH = run >= wantHours ? wantHours : (t.split !== false ? 1 : 0);
+      let takeH = run >= wantHours ? wantHours : (t.split !== false ? 1 : 0);
+      takeH = Math.min(takeH, leftBy[pd]);
       if (!takeH) continue;
       const key = L.slotKey(c.staffId, startMs);
       if (s.seen[key]) continue;
@@ -155,10 +239,14 @@ async function sweep(s) {
 
   let asked = 0;
   for (const f of foundNew) {
-    const left = remaining();
-    if (left <= 0) break;
+    const pd = planDay(t, f.startMs);
+    const left = leftBy[pd] || 0;
+    if (left <= 0) continue;
     const hrs = Math.min(f.hours || 1, left);
-    if (t.mode === 'auto') await doBook(s, f.target.staffId, f.svc && f.svc.id, f.startMs, f.raw, hrs * 60);
+    if (t.mode === 'auto') {
+      const r = await doBook(s, f.target.staffId, f.svc && f.svc.id, f.startMs, f.raw, hrs * 60);
+      if (r && r.ok) leftBy[pd] = Math.max(0, left - hrs);
+    }
     else if (asked < 4) { await offerSlot(s, f, hrs * 60); asked++; }
   }
   if (!foundNew.length) log(s, `Проверка №${s.stats.checks}: свободного нет, слежу дальше`);
@@ -257,15 +345,17 @@ async function doBook(s, staffId, serviceId, startMs, rawDatetime, durMin) {
   const done = leftHours(s) <= 0;
   if (done) t.active = false;
   const d = L.deadlines(startMs);
-  await sendAll(s,
-    `🎾 <b>Поймал корт!</b>\n` +
+  const msg = `🎾 <b>Поймал корт!</b>\n` +
     `${title} · ${L.whenText(startMs, dur)}${L.midnightNote(startMs)}\n` +
     (b.price ? `${b.price} ₸${hours > 1 ? ` (${hours} ч)` : ''} · оплата на месте\n` : `Оплата на месте\n`) +
     `Записал на: ${s.profile.name || '—'}\n\n` +
     `Передумаете — отменить онлайн можно до ${L.hm(d.online)}, дальше только звонок на ресепшн (до ${L.hm(d.phone)}).\n` +
     `📍 Daulet Tennis, ул. Кордай, 6` +
-    (done ? `\n\n🏁 Всё, цель набрана — охоту выключил.` : `\n\nОсталось поймать: ${leftHours(s)} ч`),
+    (done ? `\n\n🏁 Всё, цель набрана — охоту выключил.` : `\n\nОсталось поймать: ${leftHours(s)} ч${dayPlan(s).filter(x => x.got < x.need).length > 1 ? ' (по другим дням плана)' : ''}`);
+  const sent = await sendAll(s, msg,
     { reply_markup: { inline_keyboard: [[{ text: '↩️ Отменить бронь', callback_data: `c|${b.id}` }]] } });
+  b.notified = sent.ok > 0;
+  if (!b.notified) b.notify = msg;                 // не ушло — повторю на следующем проходе
   return { ok: true, booking: b };
 }
 
@@ -273,7 +363,7 @@ async function takeOffer(s, id) {
   const o = findOffer(s, id);
   if (!o) return { ok: false, why: 'Это предложение уже неактуально' };
   if (Date.now() > o.start - 10 * 60e3) { dropOffer(s, id); return { ok: false, why: 'Слот уже в прошлом' }; }
-  if (leftHours(s) <= 0) return { ok: false, why: 'Цель уже набрана' };
+  if (leftForDay(s, planDay(s.task, o.start)) <= 0) { dropOffer(s, id); return { ok: false, why: 'На этот день нужное уже поймано' }; }
   const r = await doBook(s, o.staffId, o.serviceId, o.start, o.raw, o.dur);
   if (r.ok || /заняли|увели/i.test(r.why || '')) dropOffer(s, id);
   return r;
@@ -309,6 +399,12 @@ async function doCancel(s, bookingId) {
 async function reminders(s) {
   const now = Date.now();
   for (const b of activeBookings(s)) {
+    // если сообщение о брони не ушло (сеть/лимит Telegram) — повторяем, пока не дойдёт
+    if (b.notified === false && b.notify) {
+      const r = await sendAll(s, b.notify,
+        { reply_markup: { inline_keyboard: [[{ text: '↩️ Отменить бронь', callback_data: `c|${b.id}` }]] } });
+      if (r.ok > 0) { b.notified = true; delete b.notify; log(s, 'Сообщение о брони дошло со второй попытки'); }
+    }
     const d = L.deadlines(b.start);
     if (!s.reminded[b.id] && now >= d.online - 65 * 60e3 && now < d.online) {
       s.reminded[b.id] = 1;
@@ -340,13 +436,19 @@ function statusText(s) {
   const type = t.type === 'indoor' ? 'крытые' : t.type === 'outdoor' ? 'открытые' : 'любой тип';
   const nums = t.type !== 'any' && t.courts && t.courts.length ? ' №' + t.courts.join(', ') : '';
   const gh = goalHours(s), bh = bookedHours(s);
+  const plan = dayPlan(s);
   let out = `${t.active ? '🟢 Охочусь' : '⚪ На паузе'} · поймано ${bh} из ${gh} ч${act.length ? ` (${act.length} брони)` : ''}\n`;
-  out += `🗓 ${days} · старты ${L.hourLabel(parseInt(t.timeFrom))}–${L.hourLabel(parseInt(t.timeTo))} · ${Math.round(t.dur / 60)} ч\n`;
+  if (plan.length > 1) out += `📆 ${plan.map(d => `${L.dayWord(Date.parse(d.iso + 'T12:00:00Z'))} ${Math.min(d.need, d.got)}/${d.need} ч`).join(' · ')}\n`;
+  out += `🗓 ${days} · старты ${L.hourLabel(parseInt(t.timeFrom))}–${L.hourLabel(parseInt(t.timeTo))} · ${Math.round(t.dur / 60)} ч · нужно ${t.needed} на каждый день\n`;
   out += `🎾 ${type}${nums} · ${t.mode === 'auto' ? 'бронирую сразу' : 'сначала спрашиваю'}${t.split !== false ? ' · можно по частям' : ''}\n`;
-  out += `⏱ Обновляю каждые ${t.interval || 15} с\n`;
+  out += `⏱ Обновляю каждые ${Math.round(pace(s) / 1000)} с${(s.bo && s.bo.fails >= 3) ? ' (сайт барахлит — притормозил)' : ''}\n`;
   out += `🔁 Проверок ${s.stats.checks} · находок ${s.stats.found}${s.stats.errors ? ` · сбоев ${s.stats.errors}` : ''}`;
   if (s.targets && s.targets.list) out += `\n🏟 Кортов вижу: ${s.targets.list.length}`;
-  if (t.active) out += `\n📡 Фоновый поиск: ${s.chainAt && Date.now() - s.chainAt < 100e3 ? 'работает' : 'перезапускается'}`;
+  if (t.active) {
+    out += `\n📡 Фоновый поиск: ${s.chainAt && Date.now() - s.chainAt < 100e3 ? 'работает на сервере' : 'перезапускается'}`;
+    const leftH = Math.max(0, Math.round((HUNT_TTL - huntAge(s)) / 3600e3));
+    out += `\n⌛ Сам остановлюсь через ${leftH} ч, если ничего не поймаю`;
+  }
   if (act.length) {
     out += '\n\n<b>Брони:</b>';
     for (const b of act) {
@@ -382,4 +484,4 @@ function dropPhantoms(s) {
   return bad.length;
 }
 
-module.exports = { goalHours, bookedHours, leftHours, pruneOffers, dropPhantoms, sweep, doBook, doCancel, reminders, statusText, activeBookings, ensureTargets, courtTitle, sendAll, takeOffer, findOffer, dropOffer, pickService };
+module.exports = { goalHours, bookedHours, leftHours, leftForDay, dayPlan, planDay, perDayHours, pace, noteResult, expired, autoStop, notifyError, HUNT_TTL, pruneOffers, dropPhantoms, sweep, doBook, doCancel, reminders, statusText, activeBookings, ensureTargets, courtTitle, sendAll, takeOffer, findOffer, dropOffer, pickService };

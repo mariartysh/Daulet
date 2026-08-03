@@ -3,6 +3,7 @@
 const store = require('../lib/store');
 const alt = require('../lib/altegio');
 const hunt = require('../lib/hunt');
+const chain = require('../lib/chain');
 const L = require('../lib/logic');
 
 module.exports = async (req, res) => {
@@ -11,12 +12,23 @@ module.exports = async (req, res) => {
   if (!q.key || q.key !== process.env.TICK_KEY) return res.status(401).json({ ok: false, error: 'bad key' });
 
   const s = await store.load();
+  const bts = await chain.beats().catch(() => ({}));
+  const age = k => (bts[k] && bts[k].at) ? Math.round((Date.now() - bts[k].at) / 1000) + ' с назад' : 'молчит';
   const out = {
     время: L.fmt(Date.now()),
     ключ_задан: !!process.env.ALTEGIO_AUTH,
     company_id: alt.CID,
     базы_api: alt.BASES,
     задание: s.task,
+    фоновый_поиск: {
+      живые_ветки: chain.aliveList(bts),
+      ветка_A: age('a'), ветка_B: age('b'),
+      последняя_проверка: s.lastTick ? L.fmt(s.lastTick) : 'не было',
+      частота_сек: Math.round(hunt.pace(s) / 1000),
+      app_url: (process.env.APP_URL || '').trim() || 'НЕ ЗАДАН — самовызовы не работают',
+      сбоев_подряд: (s.bo && s.bo.fails) || 0
+    },
+    цель_по_дням: hunt.dayPlan(s).map(d => `${d.iso}: ${Math.min(d.need, d.got)}/${d.need} ч`),
     подключено_чатов: (s.chats || []).length,
     шаги: []
   };

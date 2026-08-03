@@ -37,15 +37,24 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
 .cta.stop{background:linear-gradient(135deg,#FF2D55,#FF6A00);color:#fff;box-shadow:0 6px 26px rgba(255,45,85,.55)}
 .btn{background:var(--fill);color:var(--text);border-radius:var(--ri);padding:12px 18px;font-size:15px;font-weight:600;min-height:48px}
 .btn.danger{color:var(--pink)}
-.chip{padding:11px 16px;border-radius:100px;background:var(--fill);color:var(--text);font-size:15px;font-weight:600;min-height:44px}
+.chip{padding:12px 14px;border-radius:100px;background:var(--fill);color:var(--text);font-size:15px;font-weight:600;min-height:46px;
+  display:flex;align-items:center;justify-content:center;text-align:center;line-height:1.2}
 .chip.on{background:var(--text);color:var(--card)}
 .chips{display:flex;gap:8px;flex-wrap:wrap}
+.chips.g1{display:grid;grid-template-columns:1fr}
+.chips.g2{display:grid;grid-template-columns:repeat(2,1fr)}
+.chips.g3{display:grid;grid-template-columns:repeat(3,1fr)}
+.chips.g4{display:grid;grid-template-columns:repeat(4,1fr)}
+.stepline{display:flex;align-items:center;justify-content:space-between;gap:14px;background:var(--fill);border-radius:var(--ri);padding:10px 10px 10px 16px}
+.stepline .lbl{font-size:14px;font-weight:600;color:var(--sub)}
+.stepper{display:flex;align-items:center;gap:8px}
+.stepper .val{font-size:22px;font-weight:800;min-width:26px;text-align:center}
 .row{display:flex;gap:10px;flex-wrap:wrap}
 .row>*{flex:1;min-width:120px}
 .seg{display:flex;background:var(--fill);border-radius:100px;padding:3px;gap:2px}
 .seg button{flex:1;border-radius:100px;padding:7px 12px;font-size:13px;font-weight:600;color:var(--sub);background:transparent;min-height:32px}
 .seg button.on{background:var(--card);color:var(--text);box-shadow:0 1px 4px rgba(0,0,0,.12)}
-.step{width:52px;height:52px;border-radius:16px;background:var(--fill);color:var(--text);font-size:24px;font-weight:600}
+.step{width:46px;height:46px;border-radius:14px;background:var(--card);color:var(--text);font-size:22px;font-weight:600;display:flex;align-items:center;justify-content:center}
 .pill{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:100px;font-size:12.5px;font-weight:700;background:var(--fill);color:var(--sub)}
 .pill.live{background:linear-gradient(135deg,var(--lime1),var(--lime2));color:var(--ink);animation:pul 1.8s infinite}
 @keyframes pul{50%{filter:brightness(.85)}}
@@ -117,7 +126,8 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
       <span class="savemark" id="saveMark">Сохранено ✓</span>
     </div>
     <div class="bignum" id="bigN">0<small> из 1 ч</small></div>
-    <div class="sub" id="statusSub" style="font-weight:600">поймано кортов</div>
+    <div class="sub" id="statusSub" style="font-weight:600">поймано часов</div>
+    <div class="sub" id="perDay" style="font-weight:600"></div>
     <div class="progress"><i id="pbar" style="width:0%"></i></div>
     <button class="cta" id="toggleBtn" onclick="toggleHunt()">Начать охоту</button>
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap" class="sub">
@@ -129,49 +139,54 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
   <div class="card">
     <h2>Когда играем</h2>
     <div>
-      <label>День</label>
-      <div class="chips" id="days"></div>
+      <label>Дни поиска</label>
+      <div class="chips g1" id="days"></div>
+      <div class="sub" id="daysHint" style="margin-top:8px"></div>
     </div>
     <div class="row">
       <div><label>С</label><select id="timeFrom"></select></div>
       <div><label>До</label><select id="timeTo"></select></div>
     </div>
-    <div class="row" style="align-items:flex-end">
-      <div><label>Сколько играем</label><div class="chips" id="dur"></div><div class="sub" id="fitHint" style="margin-top:6px"></div></div>
-      <div style="flex:0 0 auto"><label>Кортов нужно</label>
-        <div style="display:flex;align-items:center;gap:12px">
-          <button class="step" onclick="stepN(-1)">−</button>
-          <span id="neededN" style="font-size:26px;font-weight:800;min-width:30px;text-align:center">1</span>
-          <button class="step" onclick="stepN(1)">+</button>
-        </div>
+    <div>
+      <label>Сколько играем</label>
+      <div class="chips g2" id="dur"></div>
+    </div>
+    <div class="stepline">
+      <span class="lbl">Кортов на каждый день</span>
+      <div class="stepper">
+        <button class="step" onclick="stepN(-1)">−</button>
+        <span class="val" id="neededN">1</span>
+        <button class="step" onclick="stepN(1)">+</button>
       </div>
     </div>
+    <div class="sub" id="fitHint"></div>
   </div>
 
-  <button class="fold" id="extraFold" onclick="toggleFold('extra','extraFold')"><span>🎛</span><span>Фильтр: тип, номер, режим</span><span class="car">▾</span></button>
+  <button class="fold" id="extraFold" onclick="toggleFold('extra','extraFold')"><span>🎛</span><span>Дополнительные фильтры</span><span class="car">▾</span></button>
   <div class="card" id="extra" style="display:none">
     <div>
       <label>Тип корта</label>
-      <div class="chips" id="type"></div>
+      <div class="chips g3" id="type"></div>
     </div>
     <div>
       <label>Номер корта</label>
-      <div class="sub" id="courtsHint" style="display:none"></div>
-      <div class="chips" id="courts"></div>
+      <div class="sub" id="courtsHint" style="display:none;margin-bottom:8px">Сначала выберите тип корта — у крытых и открытых своя нумерация.</div>
+      <div class="chips g4" id="courts"></div>
     </div>
     <div>
       <label>Как бронировать</label>
-      <div class="chips" id="mode"></div>
+      <div class="chips g2" id="mode"></div>
     </div>
-  </div>
-
-  <div class="card">
-    <h2>Как часто проверять</h2>
-    <div class="chips" id="interval"></div>
-    <div class="sub">Чем чаще — тем выше шанс поймать. 15 секунд хватает почти всегда.</div>
-    <label style="margin-top:12px">Набор часов</label>
-    <div class="chips" id="split"></div>
-    <div class="sub">По частям — бот возьмёт нужные часы вразнобой: разное время, разные корты, крытые и открытые вперемешку.</div>
+    <div>
+      <label>Как часто проверять</label>
+      <div class="chips g4" id="interval"></div>
+      <div class="sub" style="margin-top:8px">Чем чаще — тем выше шанс поймать. 10 секунд — хороший баланс.</div>
+    </div>
+    <div>
+      <label>Набор часов</label>
+      <div class="chips g2" id="split"></div>
+      <div class="sub" style="margin-top:8px">По частям — возьму нужные часы вразнобой: разное время, разные корты, крытые и открытые вперемешку.</div>
+    </div>
   </div>
 
   <div class="card">
@@ -198,11 +213,9 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
     <div class="row">
       <button class="btn" onclick="checkNow()">Проверить сейчас</button>
       <button class="btn" onclick="probe()">Тест подключения</button>
-      <button class="btn" onclick="resetAll()">Очистить данные</button>
     </div>
+    <button class="btn danger" onclick="resetAll()">Очистить данные</button>
   </div>
-
-  <div class="sub" style="padding:0 6px">Слот «завтра 00:00» — это сегодня в полночь, бот сам это учитывает.</div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -210,7 +223,7 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
 const $=id=>document.getElementById(id);
 const TGA=window.Telegram&&Telegram.WebApp&&Telegram.WebApp.initData?Telegram.WebApp:null;
 let TOKEN='',THEME='auto',DEMO=false;
-const DEF={mode:'confirm',needed:1,type:'any',courts:[],dayOffsets:[0],timeFrom:'20:00',timeTo:'22:00',dur:60,active:false};
+const DEF={mode:'confirm',needed:1,type:'any',courts:[],dayOffsets:[0],timeFrom:'20:00',timeTo:'22:00',dur:60,interval:10,split:true,active:false};
 let TASK={...DEF},PROF={name:'',phone:'',email:''};
 let saveTimer=null,adopted=false;
 const WDN=['вс','пн','вт','ср','чт','пт','сб'];
@@ -298,7 +311,7 @@ function demoApi(action,extra){
       offers:demo.offers.map(o=>({id:o.id,title:o.title,when:dWhen(o.start),price:o.price,start:o.start,midnight:new Date(o.start).getHours()===0})),
       log:demo.log.map(l=>({t:l.t,m:l.m}))});
     case 'save':if(extra.profile)Object.assign(demo.profile,extra.profile);return {ok:true};
-    case 'start':TASK.active=true;dLog('🟢 Охота запущена — проверяю каждые ~15 сек');return {ok:true};
+    case 'start':TASK.active=true;dLog('🟢 Охота запущена — проверяю каждые '+(TASK.interval||10)+' сек');return {ok:true};
     case 'stop':TASK.active=false;dLog('⏹ Охота остановлена');return {ok:true};
     case 'cancelBooking':{const b=demo.bookings.find(x=>x.id===extra.id);if(b){b.cancelled=true;dLog('↩️ Отменил '+b.title+' — слот снова свободен');}return {ok:true};}
     case 'takeOffer':{const o=demo.offers.find(x=>x.id===extra.id);if(o){o.book();demo.offers=demo.offers.filter(x=>x.id!==o.id);}return {ok:true};}
@@ -331,7 +344,7 @@ $('pw').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
 let pulseTimer=null;
 function startPulse(restart){
   if(pulseTimer){ if(!restart)return; clearInterval(pulseTimer); pulseTimer=null; }
-  const gap=Math.max(3,Number(TASK.interval||15))*1000;
+  const gap=Math.max(5,Number(TASK.interval||10))*1000;
   pulseTimer=setInterval(async()=>{ if(!TASK.active)return; try{await api('pulse');}catch(e){} refresh(); },gap);
 }
 function enter(){$('gate').style.display='none';document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');refresh();setInterval(refresh,8000);startPulse();}
@@ -384,7 +397,7 @@ function renderTask(){
   chips($('days'),[0,1,2].map(o=>[o,dayLabel(o)]),v=>TASK.dayOffsets.includes(v),v=>{
     const nx=TASK.dayOffsets.includes(v)?TASK.dayOffsets.filter(x=>x!==v):[...TASK.dayOffsets,v].sort();
     if(nx.length)TASK.dayOffsets=nx;else toast('Хотя бы один день нужен');});
-  chips($('dur'),[[60,'1 час'],[120,'2 часа'],[180,'3 часа']],v=>TASK.dur===v,v=>TASK.dur=v);
+  chips($('dur'),[[60,'1 час'],[120,'2 часа']],v=>TASK.dur===v,v=>TASK.dur=v);
   chips($('type'),[['any','Любой'],['indoor','Крытый'],['outdoor','Открытый']],v=>TASK.type===v,v=>{TASK.type=v;TASK.courts=[];});
   if(TASK.type==='any'){$('courtsHint').style.display='';$('courts').innerHTML='';}
   else{$('courtsHint').style.display='none';
@@ -394,7 +407,7 @@ function renderTask(){
       if(v===0)TASK.courts=[];
       else TASK.courts=TASK.courts.includes(v)?TASK.courts.filter(x=>x!==v):[...TASK.courts,v].sort();});}
   chips($('mode'),[['confirm','Сначала спросить'],['auto','Бронить сразу']],v=>TASK.mode===v,v=>TASK.mode=v);
-  chips($('interval'),[[1,'1 с'],[5,'5 с'],[10,'10 с'],[15,'15 с'],[30,'30 с'],[60,'60 с']],v=>Number(TASK.interval||15)===v,v=>TASK.interval=v);
+  chips($('interval'),[[10,'10 с'],[15,'15 с'],[30,'30 с'],[60,'60 с']],v=>Number(TASK.interval||10)===v,v=>TASK.interval=v);
   chips($('split'),[[true,'Можно по частям'],[false,'Только целым блоком']],v=>(TASK.split!==false)===v,v=>TASK.split=v);
   const HV=n=>String(n).padStart(2,'0')+':00';
   const HL=n=>n===24?'00:00 · полночь':n===25?'01:00 · ночью':HV(n);
@@ -405,6 +418,10 @@ function renderTask(){
   const hh=Math.round(TASK.dur/60),tv=parseInt(TASK.timeTo);
   const HLl=n=>n===24?'00:00':n===25?'01:00 ночи':String(n).padStart(2,'0')+':00';
   $('fitHint').textContent=(tv>23?'🌙 ночь включена · ':'')+`ищу старт с ${HLl(parseInt(TASK.timeFrom))} до ${HLl(tv)}`+(hh>1?` · нужно ${hh} ч подряд`:'');
+  {const nd=TASK.dayOffsets.length,total=nd*TASK.needed*hh;
+   $('daysHint').textContent=nd>1
+     ? `Цель считается по каждому дню: ${nd} ${nd===2?'дня':'дней'} × ${TASK.needed} × ${hh} ч = ${total} ч. Поймаю на один день — продолжу искать на остальные.`
+     : `Один день · ${TASK.needed} × ${hh} ч = ${total} ч.`;}
   const act=TASK.active;
   $('toggleBtn').textContent=act?'Остановить':'Начать охоту';
   $('toggleBtn').classList.toggle('stop',act);
@@ -442,7 +459,7 @@ async function toggleHunt(){
   else{
     await api('save',collect());
     const r=await api('start');
-    if(r.ok){TASK.active=true;renderTask();buzz('success');toast('Погнали! Проверяю каждые ~15 секунд 🎾');}
+    if(r.ok){TASK.active=true;renderTask();buzz('success');toast('Погнали! Проверяю каждые '+(TASK.interval||10)+' секунд 🎾');}
     else {buzz('error');toast(r.error||'Не получилось');}
   }
   refresh();
@@ -481,14 +498,18 @@ async function refresh(){
   const gh=r.goalHours||need,bh=r.bookedHours||0;
   $('bigN').innerHTML=`${bh}<small> из ${gh} ч</small>`;
   $('statusSub').textContent=bh>=gh&&bh>0?'всё поймано 🏁':'поймано часов';
+  {const pd=r.perDay||[];
+   const dw=iso=>{const diff=Math.round((Date.parse(iso+'T12:00:00Z')-Date.parse(new Date().toISOString().slice(0,10)+'T12:00:00Z'))/864e5);
+     return ['сегодня','завтра','послезавтра'][diff]||iso.slice(8,10)+'.'+iso.slice(5,7);};
+   $('perDay').textContent=pd.length>1?pd.map(d=>`${dw(d.iso)} ${d.got}/${d.need} ч`).join(' · '):'';}
   $('pbar').style.width=Math.min(100,Math.round(bh/Math.max(1,gh)*100))+'%';
   {const lt=r.lastTick||0,age=lt?Math.round((Date.now()-lt)/1000):null;
    let bg;
    if(!r.task.active)bg='поиск на паузе';
-   else if(r.bg)bg='фоновый поиск активен';
+   else if(r.bg)bg='фоновый поиск на сервере';
    else if(age!==null&&age<180)bg='фоновый поиск запускается…';
    else bg='фоновый поиск не отвечает';
-   $('stLine').innerHTML=`проверок ${r.stats.checks}<br>находок ${r.stats.found}<br>${bg}`;}
+   $('stLine').innerHTML=`проверок ${r.stats.checks}<br>находок ${r.stats.found}<br>${bg}${r.task.active&&r.pace?` · каждые ${r.pace} с`:''}`;}
   const offs=r.offers||[],ob=$('offers');
   const sig=offs.map(o=>o.id).join(',');
   if(sig&&sig!==window.__offSig){window.__offSig=sig;buzz('success');}

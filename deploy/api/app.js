@@ -1,21 +1,17 @@
 // API панели: логин, состояние, автосохранение, старт/стоп, проверка, отмена.
 const crypto = require('crypto');
-const CHAIN_TTL = 100e3;
-
-// Поднять фоновую цепочку, если она порвалась (вызов не ждём)
-function reviveChain(s, req) {
-  if (!s.task.active || s.botOn === false || !process.env.TICK_KEY) return false;
-  if (s.chainAt && Date.now() - s.chainAt < CHAIN_TTL) return false;
-  const base = (process.env.APP_URL || '').replace(/\/+$/, '')
-    || (req.headers['x-forwarded-host'] || req.headers.host ? 'https://' + (req.headers['x-forwarded-host'] || req.headers.host) : '');
-  if (!base) return false;
-  s.chainAt = Date.now();
-  try { fetch(base + '/api/tick?key=' + encodeURIComponent(process.env.TICK_KEY) + '&chain=1').catch(() => {}); } catch (e) {}
-  return true;
-}
 const store = require('../lib/store');
 const hunt = require('../lib/hunt');
+const chain = require('../lib/chain');
 const L = require('../lib/logic');
+
+// Поднять мёртвые фоновые ветки (не чаще раза в 20 сек). Состояние должно быть УЖЕ сохранено.
+async function kick(req, s, confirm) {
+  if (!s.task.active || s.botOn === false || !process.env.TICK_KEY) return [];
+  if (Date.now() - (s.kickAt || 0) < 20e3) return [];
+  s.kickAt = Date.now();
+  return chain.revive(req, { confirm: !!confirm });
+}
 
 const token = pw => crypto.createHash('sha256').update(pw + '|' + (process.env.TICK_KEY || 'salt')).digest('hex');
 
@@ -43,7 +39,12 @@ module.exports = async (req, res) => {
   try {
     switch (body.action) {
       case 'state': {
-        if (reviveChain(s, req)) { store.log(s, 'Фоновый поиск перезапущен'); await store.save(s); }
+        const bts = await chain.beats().catch(() => ({}));
+        const live = chain.aliveList(bts);
+        if (!live.length) {
+          const started = await kick(req, s, false);
+          if (started.length) { store.log(s, 'Поднимаю фоновый поиск'); await store.save(s); }
+        }
         const act = hunt.activeBookings(s).sort((a, b) => a.start - b.start);
         return res.status(200).json({
           ok: true,
@@ -51,9 +52,12 @@ module.exports = async (req, res) => {
           tg: (s.chats || []).length,
           botOn: s.botOn !== false,
           goalHours: hunt.goalHours(s), bookedHours: hunt.bookedHours(s),
+          perDay: hunt.dayPlan(s).map(d => ({ iso: d.iso, need: d.need, got: Math.min(d.need, d.got) })),
+          pace: Math.round(hunt.pace(s) / 1000),
           lastTick: s.lastTick || 0,
           chainAt: s.chainAt || 0,
-          bg: !!(s.chainAt && Date.now() - s.chainAt < CHAIN_TTL),
+          bg: live.length > 0,
+          strands: live,
           bookings: act.map(b => {
             const d = L.deadlines(b.start);
             return { id: b.id, title: hunt.courtTitle(b, b.name), when: L.whenText(b.start, b.dur), start: b.start,
@@ -73,8 +77,8 @@ module.exports = async (req, res) => {
           t.dayOffsets = (t.dayOffsets || [0]).filter(o => [0, 1, 2].includes(o));
           if (!t.dayOffsets.length) t.dayOffsets = [0];
           if (!['any', 'indoor', 'outdoor'].includes(t.type)) t.type = 'any';
-          if (![60, 120, 180].includes(t.dur)) t.dur = 60;
-          if (![1, 5, 10, 15, 30, 60].includes(Number(t.interval))) t.interval = 15;
+          if (![60, 120].includes(t.dur)) t.dur = 60;
+          if (![10, 15, 30, 60].includes(Number(t.interval))) t.interval = 10;
           t.interval = Number(t.interval);
           t.split = t.split !== false;
           if (t.type === 'any') t.courts = [];
@@ -99,18 +103,27 @@ module.exports = async (req, res) => {
       case 'start': {
         if (s.botOn === false) return res.status(200).json({ ok: false, error: 'Бот выключен владельцем' });
         if (!s.profile.phone || !s.profile.name) return res.status(200).json({ ok: false, error: 'Сначала имя и телефон — на кого бронировать?' });
-        if (hunt.leftHours(s) <= 0) return res.status(200).json({ ok: false, error: 'Цель уже набрана — увеличьте «сколько кортов»' });
+        if (hunt.leftHours(s) <= 0) return res.status(200).json({ ok: false, error: 'Цель уже набрана — добавьте дней или кортов' });
         s.task.active = true;
         s.stats.startedAt = Date.now();
+        s.bo = { fails: 0 };
         hunt.dropPhantoms(s);
         s.offers = []; s.seen = {};
-        store.log(s, `Охота запущена: нужно ${s.task.needed}, ${s.task.timeFrom}–${s.task.timeTo}`);
-        await hunt.sendAll(s, '🟢 <b>Охота запущена</b> — из панели.\n\n' + hunt.statusText(s));
+        const iv = Number(s.task.interval) || 10;
+        store.log(s, `Охота запущена: проверка каждые ${iv} с, нужно ${s.task.needed} на каждый день, ${s.task.timeFrom}–${s.task.timeTo}`);
+        await hunt.sendAll(s, `🟢 <b>Охота запущена</b> — из панели.\nПроверяю расписание каждые ${iv} с — Telegram можно закрыть, ищу на сервере.\n\n` + hunt.statusText(s));
         await hunt.sweep(s).catch(e => store.log(s, 'Первый проход не удался: ' + e.message, 1));
-        s.chainAt = 0;
-        reviveChain(s, req);
-        await store.save(s);
-        return res.status(200).json({ ok: true });
+        s.kickAt = Date.now();
+        await store.save(s);                      // сохраняем ДО запуска веток — иначе они увидят старое состояние
+        await chain.drop();
+        const okA = await chain.spawn(req, 'a', { confirm: true });
+        await chain.spawn(req, 'b', { confirm: false, delay: 20 });
+        if (!okA) {
+          const f = await store.load();
+          store.log(f, 'Фоновая ветка не поднялась — проверьте APP_URL/TICK_KEY и пингер', 1);
+          await store.save(f);
+        }
+        return res.status(200).json({ ok: true, bg: okA });
       }
       case 'stop': {
         const was = s.task.active;
@@ -119,6 +132,7 @@ module.exports = async (req, res) => {
         store.log(s, 'Охота остановлена из панели');
         if (was) await hunt.sendAll(s, '⏹ <b>Охота остановлена</b> — из панели.\nВключить снова: /menu');
         await store.save(s);
+        await chain.drop();
         return res.status(200).json({ ok: true });
       }
       case 'cancelBooking': {
@@ -129,10 +143,11 @@ module.exports = async (req, res) => {
       }
       case 'pulse': {
         if (s.botOn === false || !s.task.active) return res.status(200).json({ ok: true, idle: true });
-        const minGap = Math.max(1, Number(s.task.interval || 15)) * 1000 - 1000;
+        const minGap = Math.max(3000, hunt.pace(s) - 1500);
         if (Date.now() - (s.lastPulse || 0) < minGap) return res.status(200).json({ ok: true, skipped: true });
         s.lastPulse = Date.now(); s.lastTick = Date.now();
         const r = await hunt.sweep(s);
+        await hunt.noteResult(s, r);
         await store.save(s);
         return res.status(200).json({ ok: true, result: r });
       }
@@ -168,6 +183,7 @@ module.exports = async (req, res) => {
       case 'check': {
         if (!s.task.active) return res.status(200).json({ ok: false, error: 'Охота на паузе — сначала запустите' });
         const r = await hunt.sweep(s);
+        await hunt.noteResult(s, r);
         await store.save(s);
         return res.status(200).json({ ok: true, result: r });
       }
