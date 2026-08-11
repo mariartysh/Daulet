@@ -1,21 +1,20 @@
-// Фоновая охота. Работает на сервере и не зависит от Telegram и панели.
-// Стоп только по: цель набрана · охота отменена · 12 часов поиска.
+// Фоновая охота. Живёт на сервере: Telegram и панель можно закрыть.
+// Один проход обслуживает ВСЕХ пользователей и все их активные охоты.
 //
-// Что вызывает этот файл:
-//  1) ЗВЕНО ЦЕПОЧКИ (?chain=1&strand=a|b) — работает ~44 сек и передаёт эстафету дальше,
-//     дождавшись подтверждения. Ветка A ищет, ветка B страхует и подхватывает.
-//  2) ПИНГЕР раз в минуту (?key=…) — поднимает мёртвые ветки и, если давно не было
-//     проверки, делает одну сам. Гарантированный минимум: 1 проверка в минуту.
-//  3) Vercel Cron раз в сутки (?job=summary) — сводка + подъём веток.
+// Вызовы:
+//  1) звено цепочки (?chain=1&strand=a|b) — работает ~44 с и передаёт эстафету, дождавшись подтверждения;
+//  2) пингер раз в минуту (?key=…) — поднимает мёртвые ветки и, если давно не было проверки, делает её сам;
+//  3) ?job=summary — сводка владельцу.
 const store = require('../lib/store');
+const svc = require('../lib/svc');
 const hunt = require('../lib/hunt');
 const chain = require('../lib/chain');
 const L = require('../lib/logic');
 
-const WORK_MS = 44000;     // работа одного звена (maxDuration 60: остаток — на эстафету)
-const WATCH_MS = 10000;    // шаг стража
-const TAKEOVER = 30000;    // A молчит столько — страж начинает искать сам
-const FLOOR_MS = 20000;    // пингер делает свою проверку, если последней не было столько
+const WORK_MS = 44000;
+const WATCH_MS = 10000;
+const TAKEOVER = 30000;
+const FLOOR_MS = 20000;
 
 const authOk = req => {
   const q = req.query || {};
@@ -23,98 +22,116 @@ const authOk = req => {
     || (process.env.CRON_SECRET && (req.headers.authorization || '') === `Bearer ${process.env.CRON_SECRET}`));
 };
 
-// Охота ещё идёт? (учитывает цель, 12 часов и общий выключатель). Мутации сохраняет сам.
-async function running(s) {
-  if (s.botOn === false || !s.task.active) return false;
-  const stopped = await hunt.autoStop(s);
-  if (stopped) await store.save(s);
-  return !stopped;
-}
-
-async function sweepOnce(s) {
-  s.lastTick = Date.now();
-  s.chainAt = Date.now();
-  let r;
-  try { r = await hunt.sweep(s); }
-  catch (e) { s.stats.errors++; store.log(s, 'Сбой прохода: ' + e.message, 1); r = { error: e.message }; }
-  await hunt.noteResult(s, r);
-  await store.save(s);
-  return r;
+// Один проход по всем пользователям. Возвращает {any, pace, results}
+async function sweepAll() {
+  const g = await store.loadGlobal();
+  if (g.botOn === false) return { any: false, pace: 60000, off: true };
+  const rows = (g.users || []).filter(x => !x.blocked);
+  const users = await store.loadUsers(rows);
+  let any = false, pace = 60000;
+  const results = [];
+  for (const u of users) {
+    svc.bind(g, u);
+    let dirty = false;
+    for (const h of u.hunts) {
+      if (!h.active) continue;
+      if (await hunt.autoStop(u, h)) { dirty = true; continue; }
+      let r;
+      try { r = await hunt.sweep(u, h); }
+      catch (e) { h.stats.errors++; store.log(u, 'Сбой прохода: ' + e.message, 1); r = { error: e.message }; }
+      await hunt.noteResult(u, h, r);
+      results.push({ uid: u.uid, hunt: h.id, ...r });
+      any = true; dirty = true;
+      pace = Math.min(pace, hunt.pace(u, h));
+    }
+    try { await hunt.reminders(u); } catch (e) {}
+    u.lastTick = Date.now();
+    if (dirty || (u.hunts || []).some(h => (h.bookings || []).length)) { await store.saveUser(u); dirty = false; }
+  }
+  return { any, pace: Math.max(2000, pace), results };
 }
 
 // ---------- звено ветки ----------
 async function link(req, res, strand, run, delaySec) {
   const before = await chain.beats().catch(() => ({}));
   await chain.beat(strand, run);
-  let s = await store.load();
-  if (!(await running(s))) { await chain.drop(); return res.status(200).json({ ok: true, strand, idle: true }); }
+  // Ветка A работает, B только страхует — лишних запросов к сайту не делаем.
+  const first = strand === 'a' ? await sweepAll() : { any: await anyActive(), pace: 10000 };
+  if (!first.any) { await chain.drop(); return res.status(200).json({ ok: true, strand, idle: true }); }
   if (!chain.alive(before, strand)) {
-    store.log(s, `Фоновый поиск запущен (ветка ${strand.toUpperCase()})`);
-    await store.save(s);
+    const g = await store.loadGlobal();
+    store.log(g, `Фоновый поиск запущен (ветка ${strand.toUpperCase()})`);
+    await store.saveGlobal(g);
   }
   if (delaySec) await chain.sleep(delaySec * 1000);
 
   const until = Date.now() + WORK_MS;
-  let sweeps = 0, stop = '', last = null, respawn = 0;
+  let sweeps = 0, stop = '', respawn = 0, pace = first.pace;
   while (Date.now() < until) {
     const b = await chain.beats().catch(() => ({}));
     if (b[strand] && b[strand].run && b[strand].run !== run) { stop = 'taken'; break; }
     await chain.beat(strand, run);
-    s = await store.load();
-    if (!(await running(s))) { stop = 'done'; break; }
 
     const workA = strand === 'a';
     const standIn = !workA && Date.now() - chain.at(b, 'a') > TAKEOVER;
-    if (workA || standIn) { last = await sweepOnce(s); sweeps++; }
-    if (standIn && Date.now() - respawn > 60e3) {   // рабочая ветка молчит — поднимаем
+    if (workA || standIn) {
+      const r = await sweepAll();
+      pace = r.pace;
+      sweeps++;
+      if (!r.any) { stop = 'done'; break; }
+    }
+    if (standIn && Date.now() - respawn > 60e3) {
       respawn = Date.now();
-      store.log(s, 'Рабочая ветка молчит — поднимаю её', 1);
-      await store.save(s);
       await chain.spawn(req, 'a', { confirm: false });
     }
-    const gap = workA ? hunt.pace(s) : WATCH_MS;
+    const gap = (strand === 'a') ? pace : WATCH_MS;
     if (Date.now() + gap > until) break;
     await chain.sleep(gap);
   }
 
-  // ---------- эстафета ----------
   let handed = false, neighbour = false;
-  if (stop === 'done') { await chain.drop(); }
+  if (stop === 'done') await chain.drop();
   else if (stop !== 'taken') {
-    const fresh = await store.load();
-    if (await running(fresh)) {
+    const still = await anyActive();
+    if (still) {
       handed = await chain.spawn(req, strand, { confirm: true });
-      if (!handed) {
-        const f = await store.load();
-        store.log(f, `Ветка ${strand.toUpperCase()} не смогла передать эстафету — поднимет пингер или сосед`, 1);
-        await store.save(f);
-      }
       const other = strand === 'a' ? 'b' : 'a';
       const b2 = await chain.beats().catch(() => ({}));
       if (!chain.alive(b2, other)) neighbour = await chain.spawn(req, other, { confirm: false, delay: other === 'b' ? 20 : 0 });
     } else await chain.drop();
   }
-  return res.status(200).json({ ok: true, at: L.fmt(Date.now()), strand, run, sweeps, stop: stop || 'budget', handed, neighbour, last });
+  return res.status(200).json({ ok: true, at: L.fmt(Date.now()), strand, run, sweeps, pace, stop: stop || 'budget', handed, neighbour });
 }
 
-// ---------- пингер: сторож снаружи ----------
+async function anyActive() {
+  const g = await store.loadGlobal();
+  if (g.botOn === false) return false;
+  const users = await store.loadUsers((g.users || []).filter(x => !x.blocked));
+  return users.some(u => (u.hunts || []).some(h => h.active));
+}
+
+async function lastTickAge() {
+  const g = await store.loadGlobal();
+  const users = await store.loadUsers((g.users || []).filter(x => !x.blocked));
+  const t = Math.max(0, ...users.map(u => u.lastTick || 0));
+  return t ? Date.now() - t : Infinity;
+}
+
+// ---------- пингер ----------
 async function guard(req, res) {
-  const s = await store.load();
-  if (!(await running(s))) {
+  if (!(await anyActive())) {
     await chain.drop();
-    await hunt.reminders(s);
-    await store.save(s);
+    const g = await store.loadGlobal();
+    const users = await store.loadUsers((g.users || []).filter(x => !x.blocked));
+    for (const u of users) { svc.bind(g, u); try { await hunt.reminders(u); await store.saveUser(u); } catch (e) {} }
     return res.status(200).json({ ok: true, active: false });
   }
   const b = await chain.beats().catch(() => ({}));
   const wasAlive = chain.aliveList(b);
-  let swept = null;
-  if (Date.now() - (s.lastTick || 0) > FLOOR_MS) swept = await sweepOnce(s);   // минимум раз в минуту
+  let swept = false;
+  if ((await lastTickAge()) > FLOOR_MS) { await sweepAll(); swept = true; }
   const started = await chain.revive(req, { confirm: true });
-  return res.status(200).json({
-    ok: true, at: L.fmt(Date.now()), alive: wasAlive, started,
-    swept: !!swept, checks: s.stats.checks, found: s.stats.found
-  });
+  return res.status(200).json({ ok: true, at: L.fmt(Date.now()), alive: wasAlive, started, swept });
 }
 
 module.exports = async (req, res) => {
@@ -123,11 +140,15 @@ module.exports = async (req, res) => {
   const q = req.query || {};
 
   if (q.job === 'summary') {
-    const s = await store.load();
-    await hunt.sendAll(s, '📊 <b>Сводка за день</b>\n' + hunt.statusText(s));
-    s.lastTick = Date.now();
-    await store.save(s);
-    if (s.task.active && s.botOn !== false) await chain.revive(req, { confirm: false });
+    const g = await store.loadGlobal();
+    const users = await store.loadUsers((g.users || []).filter(x => !x.blocked));
+    for (const u of users) {
+      svc.bind(g, u);
+      if (!(u.hunts || []).some(h => h.active) && !hunt.allActiveBookings(u).length) continue;
+      await hunt.sendTo(u, '📊 <b>Сводка</b>\n' + hunt.statusText(u, g));
+      await store.saveUser(u);
+    }
+    if (await anyActive()) await chain.revive(req, { confirm: false });
     return res.status(200).json({ ok: true, job: 'summary' });
   }
 
@@ -137,7 +158,7 @@ module.exports = async (req, res) => {
     const delay = Math.max(0, Math.min(30, Number(q.delay) || 0));
     try { return await link(req, res, strand, run, delay); }
     catch (e) {
-      try { const s = await store.load(); store.log(s, `Ветка ${strand.toUpperCase()} упала: ${e.message}`, 1); await store.save(s); } catch (_) {}
+      try { const g = await store.loadGlobal(); store.log(g, `Ветка ${strand.toUpperCase()} упала: ${e.message}`, 1); await store.saveGlobal(g); } catch (_) {}
       return res.status(200).json({ ok: false, strand, error: e.message });
     }
   }

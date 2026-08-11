@@ -1,21 +1,18 @@
-// Telegram-бот: весь путь на кнопках. Меню правится на месте (editMessageText).
+// Telegram-бот. Всё на кнопках. Каждый пользователь видит только свои охоты;
+// действия те же, что в мини-приложении (общий слой lib/svc.js).
 const store = require('../lib/store');
+const svc = require('../lib/svc');
 const hunt = require('../lib/hunt');
 const chain = require('../lib/chain');
 const tg = require('../lib/tg');
 const L = require('../lib/logic');
 
-const ADMIN = (process.env.ADMIN_USERNAME || 'gaucho_bro').toLowerCase().replace('@', '');
-const CHAIN_TTL = 100e3;
-
-const bgAlive = s => !!(s.chainAt && Date.now() - s.chainAt < CHAIN_TTL);
 const APP_URL = (process.env.APP_URL || '').trim();
 const DAY = ['Сегодня', 'Завтра', 'Послезавтра'];
-const kb = rows => ({ reply_markup: { inline_keyboard: rows } });
+const kb = rows => ({ reply_markup: { inline_keyboard: rows.filter(Boolean) } });
 const btn = (text, data) => ({ text, callback_data: data });
-const appBtn = () => APP_URL ? [{ text: '📱 Открыть панель', web_app: { url: APP_URL } }] : null;
+const panelBtn = u => APP_URL && u ? [{ text: '📱 Открыть панель', web_app: { url: `${APP_URL}#tk=${svc.mkToken(u.uid)}` } }] : null;
 
-// Постоянная клавиатура под полем ввода — команды вручную не нужны
 const TOASTER = {
   keyboard: [
     [{ text: '🎾 Меню' }, { text: '📊 Статус' }],
@@ -26,149 +23,147 @@ const TOASTER = {
 };
 
 const COMMANDS = [
-  { command: 'menu', description: '🎾 Меню — всё управление' },
+  { command: 'menu', description: '🎾 Меню — все охоты' },
   { command: 'status', description: '📊 Что происходит сейчас' },
   { command: 'bookings', description: '📋 Мои брони и отмена' },
-  { command: 'stop', description: '⏹ Остановить охоту' },
+  { command: 'stop', description: '⏹ Остановить все охоты' },
   { command: 'help', description: '❓ Как это работает' }
 ];
 
 module.exports = async (req, res) => {
   if (process.env.TG_SECRET && req.headers['x-telegram-bot-api-secret-token'] !== process.env.TG_SECRET)
     return res.status(401).json({ ok: false });
-  const u = req.body || {};
-  const s = await store.load();
+  const upd = req.body || {};
+  const g = await store.loadGlobal();
   try {
-    if (u.message && u.message.text) await onMessage(s, u.message);
-    else if (u.callback_query) await onCallback(s, u.callback_query);
+    if (upd.message && upd.message.text) await onMessage(g, upd.message, req);
+    else if (upd.callback_query) await onCallback(g, upd.callback_query, req);
   } catch (e) {
-    store.log(s, 'Сбой в Telegram: ' + e.message, 1);
-  }
-  await store.save(s);
-  if (s.task.active && s.botOn !== false) {
-    const b = await chain.beats().catch(() => ({}));
-    if (!chain.aliveList(b).length) await chain.revive(req, { confirm: false });
+    store.log(g, 'Сбой в Telegram: ' + e.message, 1);
+    await store.saveGlobal(g);
   }
   return res.status(200).json({ ok: true });
 };
 
-const linked = (s, chat) => (s.chats || []).some(c => (c.id || c) === chat);
-function touch(s, chat) {
-  const c = (s.chats || []).find(x => x.id === chat);
-  if (c) { c.last = Date.now(); c.acts = (c.acts || 0) + 1; }
-}
-const isAdmin = from => (((from && from.username) || '').toLowerCase() === ADMIN);
-
 // ---------- экраны ----------
-function vMain(s, admin) {
-  const t = s.task, act = hunt.activeBookings(s).length;
-  const days = (t.dayOffsets || [0]).map(o => DAY[o].toLowerCase()).join(', ');
-  const off = s.botOn === false ? '🔴 <b>Бот выключен владельцем</b>\n\n' : '';
-  const text = `🎾 <b>Court Hunter</b>\n\n` + off + (t.active
-    ? `🟢 <b>Ловлю прямо сейчас</b>\nПлан: ${days}, ${L.hourLabel(parseInt(t.timeFrom))}–${L.hourLabel(parseInt(t.timeTo))}, ${Math.round(t.dur / 60)} ч\nПоймано: ${hunt.bookedHours(s)} из ${hunt.goalHours(s)} ч · проверяю каждые ${t.interval || 10} с\n\n${bgAlive(s) ? '📡 Фоновый поиск работает — Telegram можно закрыть.' : '⏳ Поднимаю фоновый поиск…'}`
-    : `⚪ <b>Сплю</b>\nПлан: ${days}, ${t.timeFrom}–${t.timeTo}, ${Math.round(t.dur / 60)} ч · кортов на каждый день: ${t.needed}\nПоймано: ${hunt.bookedHours(s)} из ${hunt.goalHours(s)} ч\n\nПроверьте план и жмите «Начать охоту».`);
-  const rows = [
-    [t.active ? btn('⏹ Остановить охоту', 'M|stop') : btn('▶️ Начать охоту', 'M|go')],
-    [btn('🗓 Когда', 'V|when'), btn('🎛 Фильтр', 'V|filters')],
-    [btn('🙋 Кто играет', 'V|profile'), btn(`📋 Брони (${act})`, 'V|bookings')],
-    [btn('📊 Статус', 'V|status'), btn('❓ Как это работает', 'V|help')]
-  ];
-  const ab = appBtn(); if (ab) rows.push(ab);
-  if (admin) rows.push([btn('👑 Админ-панель', 'V|admin')]);
+function vMain(u, g) {
+  const off = g.botOn === false ? '🔴 <b>Бот выключен владельцем</b>\n\n' : '';
+  const act = u.hunts.filter(h => h.active).length;
+  const text = `🎾 <b>Court Hunter</b>\n\n` + off +
+    (act ? `🟢 Ловлю прямо сейчас: ${act} ${act === 1 ? 'охота' : 'охоты'}\n\n` : `⚪ Все охоты на паузе\n\n`) +
+    u.hunts.map(h => hunt.huntLine(u, h)).join('\n\n');
+  const rows = [];
+  for (const h of u.hunts) {
+    rows.push([
+      btn(h.active ? '⏹' : '▶️', `H|${h.active ? 'stop' : 'go'}|${h.id}`),
+      btn(`${h.active ? '🟢' : '⚪'} ${hunt.label(h)}`.slice(0, 42), `V|hunt|${h.id}`)
+    ]);
+  }
+  if (u.hunts.length < store.MAX_HUNTS) rows.push([btn('➕ Ещё одна охота', 'H|add')]);
+  rows.push([btn(`👥 Контакты (${(u.contacts || []).filter(c => c.name && c.phone).length})`, 'V|contacts'),
+    btn(`📋 Брони (${hunt.allActiveBookings(u).length})`, 'V|bookings')]);
+  rows.push([btn('📊 Статус', 'V|status'), btn('❓ Как это работает', 'V|help')]);
+  const p = panelBtn(u); if (p) rows.push(p);
+  if (u.isAdmin) rows.push([btn('👑 Админ-панель', 'V|admin')]);
   return { text, ...kb(rows) };
 }
 
-function vHelp(s) {
-  return { text:
-`❓ <b>Как это работает</b>
-
-Корты в Даулете разбирают за минуты. Я обновляю расписание каждые ${s.task.interval || 10} секунд и хватаю то, что подходит под ваш план.
-
-<b>1. Когда</b> — день (сегодня / завтра / послезавтра — дальше сайт не открывает), окно времени и длительность.
-<b>2. Фильтр</b> — крытый или открытый, конкретный номер, и главное: бронировать сразу или сначала спросить.
-<b>3. Кто играет</b> — имя и телефон, на них оформляется бронь. Оплата на месте.
-<b>4. Начать охоту</b> — дальше я сам.
-
-<b>Что придёт в чат:</b>
-🔔 «Освободился корт» + кнопка «Забрать» — в режиме «сначала спросить».
-🎾 «Поймал корт!» + кнопка отмены — когда бронь уже сделана.
-⏰ «Час до дедлайна отмены» — напоминание.
-
-<b>Про отмену:</b> онлайн — не позднее 5 часов до игры, потом только звонком на ресепшн (до 3 часов). Кнопка отмены исчезает сама, когда время вышло.
-
-<b>Хитрость с полуночью:</b> слот «завтра 00:00» на сайте — это сегодня ночью. Я подписываю такие слоты 🌙, чтобы вы не приехали не в тот день.
-
-<b>Сколько кортов ловлю:</b> столько на КАЖДЫЙ выбранный день. Выбрали три дня и «1 корт» — поймал на сегодня и ищу дальше на завтра и послезавтра.
-
-Искать перестаю только в трёх случаях: всё нужное поймано · вы нажали «Остановить» · прошло 12 часов поиска. Telegram можно закрывать — я ищу на сервере.`,
-  ...kb([[btn('⬅️ В меню', 'V|main')]]) };
-}
-
-function vWhen(s) {
-  const t = s.task;
-  const dayRow = [0, 1, 2].map(o => btn(`${(t.dayOffsets || []).includes(o) ? '✅ ' : ''}${DAY[o]}`, `Wd|${o}`));
-  const night = parseInt(t.timeTo) > 23 ? '\n🌙 Ночные слоты включены: на сайте это «завтра 00:00/01:00», играете этой же ночью.' : '';
-  return { text: `🗓 <b>Когда играем</b>\n\nСейчас ловлю: ${(t.dayOffsets || [0]).map(o => DAY[o].toLowerCase()).join(', ')}, с ${L.hourLabel(parseInt(t.timeFrom))} до ${L.hourLabel(parseInt(t.timeTo))}, по ${Math.round(t.dur / 60)} ч. Кортов на каждый день: ${t.needed} (всего ${hunt.goalHours(s)} ч).${night}\n\nЖмите кнопки — всё сохраняется сразу.`, ...kb([
-    dayRow,
-    [btn('−', 'Wf|-1'), btn(`начало  ${L.hourLabel(parseInt(t.timeFrom))}`, 'x'), btn('+', 'Wf|1')],
-    [btn('−', 'Wt|-1'), btn(`конец  ${L.hourLabel(parseInt(t.timeTo))}`, 'x'), btn('+', 'Wt|1')],
-    [btn(`${t.dur === 60 ? '✅ ' : ''}1 час`, 'Du|60'), btn(`${t.dur === 120 ? '✅ ' : ''}2 часа`, 'Du|120')],
-    [btn('−', 'N|-1'), btn(`кортов в день  ${t.needed}`, 'x'), btn('+', 'N|1')],
-    [btn(`${t.split !== false ? '✅' : '⬜️'} можно набирать по частям`, 'Sp|t')],
-    [btn('⏱ обновлять каждые', 'x'), btn(`${t.interval || 15} с`, 'Iv|next')],
-    [btn('⬅️ В меню', 'V|main')]
-  ]) };
-}
-
-function vFilters(s) {
-  const t = s.task;
+function vHunt(u, h) {
+  const dayRow = [0, 1, 2].map(o => {
+    const iso = store.isoToday(o);
+    return btn(`${(h.days || []).includes(iso) ? '✅ ' : ''}${DAY[o]}`, `D|${h.id}|${o}`);
+  });
+  const night = parseInt(h.timeTo) > 23 ? '\n🌙 Ночные слоты включены: на сайте это «завтра 00:00/01:00», играете этой же ночью.' : '';
+  const type = h.type === 'indoor' ? 'крытые' : h.type === 'outdoor' ? 'открытые' : 'любой тип';
   const rows = [
-    [btn(`${t.type === 'any' ? '✅ ' : ''}Любой`, 'Ft|any'), btn(`${t.type === 'indoor' ? '✅ ' : ''}Крытый`, 'Ft|indoor'), btn(`${t.type === 'outdoor' ? '✅ ' : ''}Открытый`, 'Ft|outdoor')]
+    dayRow,
+    [btn('−', `F|${h.id}|-1`), btn(`начало  ${L.hourLabel(parseInt(h.timeFrom))}`, 'x'), btn('+', `F|${h.id}|1`)],
+    [btn('−', `T|${h.id}|-1`), btn(`конец  ${L.hourLabel(parseInt(h.timeTo))}`, 'x'), btn('+', `T|${h.id}|1`)],
+    [btn('−', `N|${h.id}|-1`), btn(`кортов на день  ${h.needed}`, 'x'), btn('+', `N|${h.id}|1`)],
+    [btn('⏱ проверять каждые', 'x'), btn(`${h.interval} с`, `I|${h.id}`)],
+    [btn(`${h.type === 'any' ? '✅ ' : ''}Любой`, `Y|${h.id}|any`), btn(`${h.type === 'indoor' ? '✅ ' : ''}Крытый`, `Y|${h.id}|indoor`), btn(`${h.type === 'outdoor' ? '✅ ' : ''}Открытый`, `Y|${h.id}|outdoor`)]
   ];
-  let note = '';
-  if (t.type === 'any') note = '\n\nНомер можно выбрать после типа: у крытых №1–8 и открытых №1–5 нумерация своя.';
-  else {
-    const maxN = t.type === 'indoor' ? 8 : 5;
-    const nums = [btn(`${!t.courts.length ? '✅ ' : ''}Любой №`, 'Fc|0')];
-    for (let n = 1; n <= maxN; n++) nums.push(btn(`${t.courts.includes(n) ? '✅' : ''}№${n}`, `Fc|${n}`));
+  if (h.type !== 'any') {
+    const maxN = h.type === 'indoor' ? 8 : 5;
+    const nums = [btn(`${!h.courts.length ? '✅ ' : ''}Любой №`, `C|${h.id}|0`)];
+    for (let n = 1; n <= maxN; n++) nums.push(btn(`${h.courts.includes(n) ? '✅' : ''}№${n}`, `C|${h.id}|${n}`));
     for (let i = 0; i < nums.length; i += 5) rows.push(nums.slice(i, i + 5));
   }
-  rows.push([btn(`${t.mode === 'confirm' ? '✅ ' : ''}Спросить меня`, 'Fm|confirm'), btn(`${t.mode === 'auto' ? '✅ ' : ''}Брать сразу`, 'Fm|auto')]);
+  rows.push([btn(`${h.mode === 'auto' ? '✅ ' : ''}Брать сразу`, `M|${h.id}|auto`), btn(`${h.mode === 'confirm' ? '✅ ' : ''}Спросить меня`, `M|${h.id}|confirm`)]);
+  rows.push([h.active ? btn('⏹ Остановить эту охоту', `H|stop|${h.id}`) : btn('▶️ Запустить эту охоту', `H|go|${h.id}`)]);
+  if (u.hunts.length > 1) rows.push([btn('🗑 Удалить охоту', `H|del|${h.id}`)]);
   rows.push([btn('⬅️ В меню', 'V|main')]);
-  const mode = t.mode === 'confirm'
-    ? '✋ <b>Спросить меня</b> — пришлю слот с кнопкой «Забрать», бронь только после нажатия. Безопасно, но корт могут увести за эти секунды.'
-    : '⚡ <b>Брать сразу</b> — бронирую молча и потом сообщаю. Так надёжнее поймать вечерний слот.';
-  return { text: `🎛 <b>Какой корт ловим</b>${note}\n\n${mode}`, ...kb(rows) };
+  const plan = hunt.dayPlan(h).map(d => `${L.isoWord(d.iso)} ${Math.min(d.need, d.got)}/${d.need}`).join(' · ');
+  const mode = h.mode === 'auto'
+    ? '⚡ <b>Брать сразу</b> — бронирую молча и потом сообщаю. Надёжнее для вечерних слотов.'
+    : '✋ <b>Спросить меня</b> — пришлю кнопку «Забрать», бронь только после нажатия.';
+  const mass = h.needed > 1
+    ? `\n\n👥 На одно время несколько кортов — оформлю на разных людей из списка контактов (${(u.contacts || []).filter(c => c.name && c.phone).length} шт.), чтобы администрация не отменила.`
+    : '';
+  return { text: `🎯 <b>${hunt.label(h)}</b>\n\n${plan || '—'} · ${type} · каждые ${h.interval} с${night}${mass}\n\n${mode}`, ...kb(rows) };
 }
 
-function vProfile(s) {
-  const p = s.profile;
-  const ready = p.name && p.phone;
-  return { text: `🙋 <b>На кого бронируем</b>\n\nИмя: ${p.name || '— не указано'}\nТелефон: ${p.phone || '— не указан'}\nПочта: ${p.email || '—'}\n\n${ready ? 'Всё на месте, можно охотиться. ' : '⚠️ Имя и телефон обязательны — без них не начну. '}Сайт данные не проверяет, оплата на месте.`, ...kb([
-    [btn('✏️ Имя', 'P|name'), btn('✏️ Телефон', 'P|phone')],
-    [btn('✏️ Почта', 'P|email')],
-    [btn('⬅️ В меню', 'V|main')]
+function vContacts(u) {
+  const list = u.contacts || [];
+  let text = `👥 <b>На кого бронируем</b>\n\nПервый контакт — основной. Остальные нужны, когда на одно и то же время берём больше одного корта: администрация отменяет несколько кортов, записанных на одного человека.\n`;
+  if (!list.length) text += `\nПока пусто. Добавьте себя — имя и телефон.`;
+  const rows = [];
+  list.forEach((c, i) => {
+    text += `\n${i + 1}. <b>${c.name || '— без имени'}</b> · ${c.phone || '— без телефона'}${c.email ? ' · ' + c.email : ''}${i === 0 ? '  ← основной' : ''}`;
+    rows.push([btn(`✏️ ${i + 1}. ${(c.name || 'без имени').slice(0, 18)}`, `PE|${i}`), btn('🗑', `PD|${i}`)]);
+  });
+  if (list.length < store.MAX_CONTACTS) rows.push([btn('➕ Добавить контакт', 'PA|0')]);
+  rows.push([btn('⬅️ В меню', 'V|main')]);
+  return { text, ...kb(rows) };
+}
+
+function vContact(u, i) {
+  const c = (u.contacts || [])[i] || { name: '', phone: '', email: '' };
+  return { text: `✏️ <b>Контакт ${Number(i) + 1}</b>\n\nИмя: ${c.name || '— не указано'}\nТелефон: ${c.phone || '— не указан'}\nПочта: ${c.email || '—'}\n\nСайт данные не проверяет, оплата на месте — главное, чтобы на ресепшене узнали.`, ...kb([
+    [btn('Имя', `P|${i}|name`), btn('Телефон', `P|${i}|phone`), btn('Почта', `P|${i}|email`)],
+    [btn('⬅️ К контактам', 'V|contacts')]
   ]) };
 }
 
-function vBookings(s) {
-  const act = hunt.activeBookings(s).sort((a, b) => a.start - b.start);
-  if (!act.length) return { text: '📋 <b>Брони</b>\n\nПока пусто. Запустите охоту — добыча появится здесь.', ...kb([[btn('▶️ Начать охоту', 'M|go')], [btn('⬅️ В меню', 'V|main')]]) };
+function vBookings(u) {
+  const act = hunt.allActiveBookings(u).sort((a, b) => a.b.start - b.b.start);
+  if (!act.length) return { text: '📋 <b>Брони</b>\n\nПока пусто. Запустите охоту — добыча появится здесь.', ...kb([[btn('⬅️ В меню', 'V|main')]]) };
   let text = '📋 <b>Брони</b>';
   const rows = [];
-  for (const b of act) {
+  for (const { b } of act) {
     const d = L.deadlines(b.start);
     const late = Date.now() >= d.online;
-    text += `\n\n🎾 <b>${hunt.courtTitle(b, b.name)}</b> · ${L.whenText(b.start, b.dur)}${L.midnightNote(b.start)}\n${late ? `Онлайн уже поздно — только звонком, до ${L.hm(d.phone)}` : `Отменить онлайн можно до ${L.hm(d.online)}, звонком — до ${L.hm(d.phone)}`}`;
+    text += `\n\n🎾 <b>${hunt.courtTitle(b, b.name)}</b> · ${L.whenText(b.start, 60)}${L.midnightNote(b.start)}\nна ${b.onName || '—'}\n${late ? `Онлайн уже поздно — только звонком, до ${L.hm(d.phone)}` : `Отменить онлайн можно до ${L.hm(d.online)}, звонком — до ${L.hm(d.phone)}`}`;
     if (!late) rows.push([btn(`↩️ Отменить ${L.hm(b.start)} · ${hunt.courtTitle(b, b.name)}`, `c|${b.id}`)]);
   }
   rows.push([btn('⬅️ В меню', 'V|main')]);
   return { text, ...kb(rows) };
 }
 
-function vStatus(s) {
-  return { text: '📊 <b>Статус</b>\n\n' + hunt.statusText(s), ...kb([[btn('🔄 Обновить', 'V|status'), btn('⬅️ В меню', 'V|main')]]) };
-}
+const vStatus = (u, g) => ({ text: '📊 <b>Статус</b>\n\n' + hunt.statusText(u, g), ...kb([[btn('🔄 Обновить', 'V|status'), btn('⬅️ В меню', 'V|main')]]) });
+
+const vHelp = u => ({ text:
+`❓ <b>Как это работает</b>
+
+Корты в Даулете разбирают за минуты. Я обновляю расписание каждые ${(u.hunts[0] || {}).interval || store.DEF_IV} секунд и хватаю то, что подходит под ваш план.
+
+<b>1. Контакты</b> — имя и телефон, на них оформляется бронь. Нужно взять несколько кортов на одно время — добавьте разных людей: на одно имя администрация отменяет.
+<b>2. Охота</b> — дни, окно времени, сколько кортов на каждый день, тип корта.
+<b>3. Запуск</b> — дальше я сам. Можно держать до ${store.MAX_HUNTS} охот одновременно: например «сегодня вечер» и «выходные утро».
+
+<b>Единица брони — один час.</b> Нужно два часа подряд — поставьте «2 корта на день»: возьму два соседних часа, если они свободны.
+
+<b>Что придёт в чат:</b>
+🔔 «Освободился корт» + «Забрать» — в режиме «спросить меня».
+🎾 «Поймал корт!» + кнопка отмены — когда бронь сделана.
+⏰ «Час до дедлайна отмены».
+
+<b>Про отмену:</b> онлайн — не позднее 5 часов до игры, потом только звонком (до 3 часов).
+
+<b>Полночь:</b> слот «завтра 00:00» на сайте — это сегодня ночью, помечаю 🌙. Когда сутки меняются, «завтра» само становится «сегодня» — план не сбивается.
+
+Искать перестаю только если: всё поймано · вы остановили · прошло 12 часов · выбранные дни закончились. Telegram можно закрывать, поиск идёт на сервере.`,
+  ...kb([[btn('⬅️ В меню', 'V|main')]]) });
 
 function ago(ts) {
   if (!ts) return 'ещё не заходил';
@@ -181,233 +176,333 @@ function ago(ts) {
   return d === 1 ? 'вчера' : `${d} дн назад`;
 }
 
-function vAdmin(s) {
-  const list = s.chats || [];
-  const on = s.botOn !== false;
-  let text = `👑 <b>Админ-панель</b>\n\n` +
-    `Бот: ${on ? '🟢 включён' : '🔴 выключен для всех'}\n` +
-    `Охота: ${s.task.active ? 'идёт' : 'на паузе'} · поймано ${hunt.activeBookings(s).length} из ${s.task.needed}\n` +
-    `Пользователей: ${list.length}\n`;
-  list.forEach((c, i) => {
-    const me = (c.u || '').toLowerCase() === ADMIN;
-    text += `\n${i + 1}. ${c.u ? '@' + c.u : (c.name || 'без ника')}${me ? ' 👑 (вы)' : ''}\n` +
-      `    ${c.name || '—'} · id <code>${c.id}</code>\n` +
-      `    подключён: ${c.at ? L.fmt(c.at) : '—'}\n` +
-      `    был: ${ago(c.last)} · действий: ${c.acts || 0}`;
+async function vAdmin(g) {
+  const users = await store.loadUsers(g.users || []);
+  const on = g.botOn !== false;
+  let text = `👑 <b>Админ-панель</b>\n\nБот: ${on ? '🟢 включён' : '🔴 выключен для всех'}\nПользователей: ${(g.users || []).length}\n`;
+  (g.users || []).forEach((r, i) => {
+    const x = users.find(y => y.uid === r.uid);
+    const hs = x ? x.hunts : [];
+    const act = hs.filter(h => h.active);
+    text += `\n${i + 1}. ${r.u ? '@' + r.u : (r.name || 'без ника')}${r.uid === g.adminUid ? ' 👑 (вы)' : ''}${r.blocked ? ' 🚫 отключён' : ''}\n` +
+      `    ${r.name || '—'} · был: ${ago(r.last)} · действий: ${r.acts || 0}\n` +
+      `    охоты: ${hs.length}${act.length ? ` · 🟢 идёт ${act.length}` : ' · на паузе'}\n`;
+    for (const h of hs) {
+      text += `      ${h.active ? '🟢' : '⚪'} ${hunt.label(h)} — ${hunt.bookedSlots(h)}/${hunt.goalSlots(h)}, каждые ${h.interval} с, ${h.mode === 'auto' ? 'сразу' : 'спрашивает'}\n`;
+      for (const b of hunt.activeBookings(h)) text += `         🎾 ${hunt.courtTitle(b, b.name)} ${L.whenText(b.start, 60)} · ${b.onName || '—'}\n`;
+    }
+    const cs = x ? (x.contacts || []).filter(c => c.name || c.phone) : [];
+    if (cs.length) text += `    контакты: ${cs.map(c => `${c.name} ${c.phone}`).join(' · ')}\n`;
   });
-  text += `\n\nПароль: <code>${s.password}</code>\nСменить: <code>/key НовыйПароль</code>`;
+  text += `\nПароль доступа: <code>${g.password}</code>\nСменить: <code>/key НовыйПароль</code>`;
   const rows = [[on ? btn('🔴 Отключить бот', 'AB|off') : btn('🟢 Включить бот', 'AB|on')]];
-  for (const c of list) {
-    if ((c.u || '').toLowerCase() === ADMIN) continue;
-    rows.push([btn(`🚫 Отключить ${c.u ? '@' + c.u : (c.name || c.id)}`, `A|${c.id}`)]);
+  for (const r of g.users || []) {
+    if (r.uid === g.adminUid) continue;
+    const x = users.find(y => y.uid === r.uid);
+    const line = [];
+    if (x && x.hunts.some(h => h.active)) line.push(btn(`⏹ ${r.u ? '@' + r.u : r.name || r.uid}`, `AS|${r.uid}`));
+    line.push(btn(`${r.blocked ? '🔓 Вернуть' : '🚫 Отключить'} ${r.u ? '@' + r.u : r.name || r.uid}`.slice(0, 38), `A|${r.uid}`));
+    rows.push(line);
   }
   rows.push([btn('🔄 Обновить', 'V|admin'), btn('⬅️ В меню', 'V|main')]);
   return { text, ...kb(rows) };
 }
 
-const VIEWS = { main: vMain, when: vWhen, filters: vFilters, profile: vProfile, bookings: vBookings, status: vStatus, help: vHelp, admin: vAdmin };
+async function view(name, u, g, arg) {
+  if (name === 'hunt') return vHunt(u, svc.findHunt(u, arg));
+  if (name === 'contacts') return vContacts(u);
+  if (name === 'contact') return vContact(u, arg);
+  if (name === 'bookings') return vBookings(u);
+  if (name === 'status') return vStatus(u, g);
+  if (name === 'help') return vHelp(u);
+  if (name === 'admin') return u.isAdmin ? await vAdmin(g) : vMain(u, g);
+  return vMain(u, g);
+}
 
 // ---------- сообщения ----------
-async function onMessage(s, m) {
+async function onMessage(g, m, req) {
   const chat = m.chat.id;
+  const from = m.from || {};
+  const uid = Number(from.id || chat);
   const text = (m.text || '').trim();
   const [cmd, ...rest] = text.split(/\s+/);
   const arg = rest.join(' ');
-  const admin = isAdmin(m.from);
-  touch(s, chat);
-  if (s.botOn === false && !admin && linked(s, chat))
-    return tg.send(chat, '🔴 Бот сейчас выключен владельцем. Загляните позже.');
+  let row = svc.userRow(g, uid);
 
   // ---- не подключён: только пароль ----
-  if (!linked(s, chat)) {
+  if (!row) {
     const pw = cmd === '/start' ? arg : text;
-    if (pw && pw === s.password) {
-      s.chats = s.chats || [];
-      s.chats.push({ id: chat, name: (m.from && m.from.first_name) || '', u: (m.from && m.from.username) || '', at: Date.now() });
-      store.log(s, `Подключился чат: ${(m.from && m.from.first_name) || chat}${(m.from && m.from.username) ? ' @' + m.from.username : ''}`);
+    if (pw && pw === g.password) {
+      const { u } = await svc.linkUser(g, from, chat);
+      store.log(g, `Подключился: ${from.first_name || uid}${from.username ? ' @' + from.username : ''}`);
+      await store.saveGlobal(g);
       await tg.setCommands(COMMANDS);
-      if (APP_URL) await tg.call('setChatMenuButton', { chat_id: chat, menu_button: { type: 'web_app', text: 'Панель', web_app: { url: APP_URL } } });
+      if (APP_URL) await tg.call('setChatMenuButton', { chat_id: chat, menu_button: { type: 'web_app', text: 'Панель', web_app: { url: `${APP_URL}#tk=${svc.mkToken(uid)}` } } });
       await tg.send(chat, '⌨️ Кнопки внизу — вместо команд.', { reply_markup: TOASTER });
-      const ab = appBtn();
+      const p = panelBtn(u);
       await tg.send(chat,
         `🤝 <b>Пароль принят — вы в деле!</b>\n\n` +
-        `Дальше всё на кнопках, ничего печатать не нужно. Быстрый старт:\n` +
-        `1️⃣ «Кто играет» — имя и телефон\n` +
-        `2️⃣ «Когда» — день и время\n` +
-        `3️⃣ «Начать охоту» — я слежу за расписанием и пишу сюда\n\n` +
-        (ab ? `Кнопка «📱 Открыть панель» — то же самое, но экраном: удобно с телефона.` : ''),
-        ab ? { reply_markup: { inline_keyboard: [ab] } } : {});
-      const v = vMain(s, admin);
+        `У вас свой профиль: свои контакты, свои охоты, свои брони. Другие пользователи их не видят.\n\n` +
+        `1️⃣ «Контакты» — имя и телефон\n2️⃣ «Охота» — дни и время\n3️⃣ «Запустить» — дальше я сам\n\n` +
+        (p ? `Кнопка «📱 Открыть панель» — то же самое экраном.` : ''),
+        p ? { reply_markup: { inline_keyboard: [p] } } : {});
+      const v = vMain(u, g);
       return tg.send(chat, v.text, { reply_markup: v.reply_markup });
     }
-    if (cmd.startsWith('/')) {
-      return tg.send(chat, '🔒 <b>Сначала пароль</b>\nЭто закрытый бот. Пришлите пароль одним сообщением — и открою доступ.');
-    }
-    return tg.send(chat,
-      `🎾 <b>Court Hunter</b>\n\nЛовлю свободные корты в Daulet Tennis (Кордай, 6) и бронирую их на вас, пока не увели.\n\n🔒 Доступ по паролю — пришлите его одним сообщением.`);
+    if (cmd.startsWith('/')) return tg.send(chat, '🔒 <b>Сначала пароль</b>\nЭто закрытый бот. Пришлите пароль одним сообщением — и открою доступ.');
+    return tg.send(chat, `🎾 <b>Court Hunter</b>\n\nЛовлю свободные корты в Daulet Tennis (Кордай, 6) и бронирую их на вас, пока не увели.\n\n🔒 Доступ по паролю — пришлите его одним сообщением.`);
   }
 
-  // ---- скрытая команда владельца ----
+  const u = await store.loadOrCreate(uid, chat);
+  u.chat = chat; u.name = from.first_name || u.name; u.u = from.username || u.u;
+  svc.bind(g, u);
+  svc.touch(g, uid);
+  if (row.blocked && !u.isAdmin) { await store.saveGlobal(g); return tg.send(chat, '🚪 Доступ закрыт владельцем.'); }
+  if (g.botOn === false && !u.isAdmin) { await store.saveGlobal(g); return tg.send(chat, '🔴 Бот сейчас выключен владельцем. Загляните позже.'); }
+
+  const done = async r => { await store.saveGlobal(g); await store.saveUser(u); return r; };
+
   if (cmd === '/key') {
-    if (!admin) return tg.send(chat, '⛔️ Такой команды нет.');
-    if (!arg || arg.length < 6) return tg.send(chat, 'Формат: <code>/key НовыйПароль</code> (от 6 символов)');
-    s.password = arg;
-    store.log(s, 'Пароль обновлён владельцем');
-    return tg.send(chat, `🔑 Готово, новый пароль: <code>${arg}</code>\nСтарый больше не работает — уже подключённые чаты остаются.`);
+    if (!u.isAdmin) return done(tg.send(chat, '⛔️ Такой команды нет.'));
+    if (!arg || arg.length < 6) return done(tg.send(chat, 'Формат: <code>/key НовыйПароль</code> (от 6 символов)'));
+    g.password = arg;
+    store.log(g, 'Пароль обновлён владельцем');
+    return done(tg.send(chat, `🔑 Готово, новый пароль: <code>${arg}</code>\nУже подключённые остаются.`));
   }
 
-  // ---- ждём текстовый ввод ----
-  if (s.pending && s.pending.chat === chat && !text.startsWith('/')) {
-    const f = s.pending.field;
-    s.pending = null;
-    if (f === 'phone') {
-      let d = text.replace(/\D/g, '');
-      if (d.startsWith('8')) d = '7' + d.slice(1);
-      if (!d.startsWith('7')) d = '7' + d;
-      if (d.length !== 11) { s.pending = { chat, field: 'phone' }; return tg.send(chat, 'В казахстанском номере 10 цифр после +7. Ещё раз? Например: 705 123 45 67'); }
-      s.profile.phone = '+' + d;
-    } else if (f === 'email') {
-      if (text !== '-' && !/^\S+@\S+\.\S+$/.test(text)) { s.pending = { chat, field: 'email' }; return tg.send(chat, 'Кажется, опечатка в адресе. Ещё раз? (или «-», чтобы оставить пустым)'); }
-      s.profile.email = text === '-' ? '' : text;
-    } else s.profile.name = text.slice(0, 60);
-    store.log(s, 'Данные для брони обновлены из Telegram');
-    const v = vProfile(s);
-    return tg.send(chat, '👌 Записал.\n\n' + v.text, { reply_markup: v.reply_markup });
+  // ---- ждём текстовый ввод (контакты) ----
+  if (u.pending && !text.startsWith('/')) {
+    const { field, ci } = u.pending;
+    u.pending = null;
+    if (field === 'phone') {
+      const ph = svc.normPhone(text);
+      if (!ph) { u.pending = { field, ci }; return done(tg.send(chat, 'В казахстанском номере 10 цифр после +7. Ещё раз? Например: 705 123 45 67')); }
+      svc.setContact(u, ci, { phone: ph });
+    } else if (field === 'email') {
+      if (text !== '-' && !/^\S+@\S+\.\S+$/.test(text)) { u.pending = { field, ci }; return done(tg.send(chat, 'Кажется, опечатка в адресе. Ещё раз? (или «-», чтобы оставить пустым)')); }
+      svc.setContact(u, ci, { email: text === '-' ? '' : text });
+    } else svc.setContact(u, ci, { name: text.slice(0, 60) });
+    store.log(u, 'Контакты обновлены из Telegram');
+    const v = vContact(u, ci);
+    return done(tg.send(chat, '👌 Записал.\n\n' + v.text, { reply_markup: v.reply_markup }));
   }
 
   if (cmd === '/start' || cmd === '/menu' || text === '🎾 Меню') {
+    // Держим кнопку меню чата на том же URL, что и кнопка в сообщении: разные ссылки
+    // Telegram считает разными мини-аппами и открывает второе окно.
+    if (APP_URL) await tg.call('setChatMenuButton', { chat_id: chat, menu_button: { type: 'web_app', text: 'Панель', web_app: { url: `${APP_URL}#tk=${svc.mkToken(uid)}` } } });
     await tg.send(chat, '⌨️ Кнопки внизу — вместо команд.', { reply_markup: TOASTER });
-    const v = vMain(s, admin); return tg.send(chat, v.text, { reply_markup: v.reply_markup });
+    const v = vMain(u, g); return done(tg.send(chat, v.text, { reply_markup: v.reply_markup }));
   }
-  if (cmd === '/help' || text === '❓ Помощь') { const v = vHelp(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup }); }
-  if (cmd === '/status' || text === '📊 Статус') { const v = vStatus(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup }); }
-  if (cmd === '/bookings' || cmd === '/cancel' || text === '📋 Брони') { const v = vBookings(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup }); }
-  if (cmd === '/stop' || text === '⏹ Стоп') { s.task.active = false; store.log(s, 'Охота остановлена из Telegram'); return tg.send(chat, '⏹ Остановил. Вернуться — /menu'); }
+  if (cmd === '/help' || text === '❓ Помощь') { const v = vHelp(u); return done(tg.send(chat, v.text, { reply_markup: v.reply_markup })); }
+  if (cmd === '/status' || text === '📊 Статус') { const v = vStatus(u, g); return done(tg.send(chat, v.text, { reply_markup: v.reply_markup })); }
+  if (cmd === '/bookings' || cmd === '/cancel' || text === '📋 Брони') { const v = vBookings(u); return done(tg.send(chat, v.text, { reply_markup: v.reply_markup })); }
+  if (cmd === '/stop' || text === '⏹ Стоп') {
+    let n = 0;
+    for (const h of u.hunts) if (h.active) { await svc.stopHunt(u, g, h, req, 'Telegram'); n++; }
+    const v = vMain(u, g);
+    return done(tg.send(chat, n ? `⏹ Остановил ${n === 1 ? 'охоту' : `охот: ${n}`}. В панели тоже выключено.` : 'Все охоты и так на паузе.', { reply_markup: v.reply_markup }));
+  }
   if (cmd === '/admin') {
-    if (!admin) return tg.send(chat, '⛔️ Такой команды нет.');
-    const v = vAdmin(s); return tg.send(chat, v.text, { reply_markup: v.reply_markup });
+    if (!u.isAdmin) return done(tg.send(chat, '⛔️ Такой команды нет.'));
+    const v = await vAdmin(g); return done(tg.send(chat, v.text, { reply_markup: v.reply_markup }));
   }
-  const v = vMain(s, admin);
-  return tg.send(chat, 'Я тут 👋 Всё управление — на кнопках:', { reply_markup: v.reply_markup });
+  const v = vMain(u, g);
+  return done(tg.send(chat, 'Я тут 👋 Всё управление — на кнопках:', { reply_markup: v.reply_markup }));
 }
 
 // ---------- кнопки ----------
-async function onCallback(s, cb) {
+async function onCallback(g, cb, req) {
   const chat = cb.message && cb.message.chat.id;
   const msgId = cb.message && cb.message.message_id;
-  const admin = isAdmin(cb.from);
-  touch(s, chat);
-  if (s.botOn === false && !admin && linked(s, chat)) return tg.answerCb(cb.id, 'Бот выключен владельцем');
-  if (!linked(s, chat)) { await tg.send(chat, '🔒 Сначала пришлите пароль одним сообщением.'); return tg.answerCb(cb.id, 'Нужен пароль'); }
-  const [op, a, b2, c2] = String(cb.data || '').split('|');
-  const t = s.task;
-  let view = null, toast = '';
+  const uid = Number((cb.from && cb.from.id) || chat);
+  const row = svc.userRow(g, uid);
+  if (!row) { await tg.send(chat, '🔒 Сначала пришлите пароль одним сообщением.'); return tg.answerCb(cb.id, 'Нужен пароль'); }
+  const u = await store.loadOrCreate(uid, chat);
+  svc.bind(g, u);
+  svc.touch(g, uid);
+  if (row.blocked && !u.isAdmin) return tg.answerCb(cb.id, 'Доступ закрыт владельцем');
+  if (g.botOn === false && !u.isAdmin) return tg.answerCb(cb.id, 'Бот выключен владельцем');
 
-  const show = async name => {
-    const v = VIEWS[name](s, admin);
+  const [op, a, b2] = String(cb.data || '').split('|');
+  let toast = '', target = null, targetArg = null;
+  const show = async (name, arg) => {
+    const v = await view(name, u, g, arg);
     await tg.edit(chat, msgId, v.text, { reply_markup: v.reply_markup });
+  };
+  const fin = async () => {
+    await store.saveGlobal(g);
+    await store.saveUser(u);
+    if (target) await show(target, targetArg);
+    return tg.answerCb(cb.id, toast);
   };
 
   if (op === 'x') return tg.answerCb(cb.id, '');
+
   if (op === 'V') {
-    if (a === 'admin' && !admin) return tg.answerCb(cb.id, 'Только для владельца');
-    await show(a); return tg.answerCb(cb.id, '');
+    if (a === 'admin' && !u.isAdmin) return tg.answerCb(cb.id, 'Только для владельца');
+    target = a; targetArg = b2;
+    return fin();
   }
 
-  if (op === 'M') {
-    if (a === 'stop') { t.active = false; store.log(s, 'Охота остановлена кнопкой'); toast = 'Остановил'; view = 'main'; }
-    else if (a === 'go') {
-      if (s.botOn === false) return tg.answerCb(cb.id, 'Бот выключен владельцем');
-      if (!s.profile.name || !s.profile.phone) { await show('profile'); return tg.answerCb(cb.id, 'Сначала имя и телефон'); }
-      if (hunt.leftHours(s) <= 0) { toast = 'Цель уже набрана — добавьте дней или кортов'; view = 'when'; }
-      else {
-        t.active = true; s.stats.startedAt = Date.now(); s.bo = { fails: 0 };
-        hunt.dropPhantoms(s); s.offers = []; s.seen = {};
-        store.log(s, `Охота запущена из Telegram: проверка каждые ${t.interval || 10} с, нужно ${t.needed} на каждый день, ${t.timeFrom}–${t.timeTo}`);
-        await hunt.sendAll(s, `🟢 <b>Охота запущена</b>\nПроверяю расписание каждые ${t.interval || 10} с — Telegram можно закрыть, ищу на сервере.\n\n` + hunt.statusText(s));
-        toast = `Погнали! Каждые ${t.interval || 10} с 🟢`; view = 'main';
+  // ---- охоты ----
+  if (op === 'H') {
+    if (a === 'add') {
+      const r = svc.addHunt(u);
+      toast = r.ok ? 'Добавил охоту' : r.why;
+      target = r.ok ? 'hunt' : 'main'; targetArg = r.ok ? r.h.id : null;
+      return fin();
+    }
+    const h = svc.findHunt(u, b2);
+    if (a === 'go') {
+      const r = await svc.startHunt(u, g, h, req, 'Telegram');
+      if (!r.ok) {
+        if (/контакт/i.test(r.why)) { await store.saveUser(u); await show('contacts'); return tg.answerCb(cb.id, r.why); }
+        toast = r.why; target = 'hunt'; targetArg = h.id;
+        return fin();
       }
+      toast = `Погнали! Каждые ${h.interval} с 🟢`;
+      target = 'main';
+      return fin();
+    }
+    if (a === 'stop') { await svc.stopHunt(u, g, h, req, 'Telegram'); toast = 'Остановил — и в панели тоже'; target = 'main'; return fin(); }
+    if (a === 'del') {
+      const r = svc.removeHunt(u, h.id);
+      toast = r.ok ? 'Удалил' : r.why; target = r.ok ? 'main' : 'hunt'; targetArg = r.ok ? null : h.id;
+      return fin();
     }
   }
-  else if (op === 'Wd') {
-    const o = Number(a);
-    const next = (t.dayOffsets || []).includes(o) ? t.dayOffsets.filter(x => x !== o) : [...(t.dayOffsets || []), o].sort();
-    if (!next.length) return tg.answerCb(cb.id, 'Хотя бы один день нужен');
-    t.dayOffsets = next; view = 'when';
+
+  // ---- правки плана ----
+  const H = () => svc.findHunt(u, a);
+  if (op === 'D') {
+    const h = H(), iso = store.isoToday(Number(b2));
+    const days = (h.days || []).includes(iso) ? h.days.filter(x => x !== iso) : [...(h.days || []), iso].sort();
+    if (!days.length) return tg.answerCb(cb.id, 'Хотя бы один день нужен');
+    svc.patchHunt(u, h, { days });
+    target = 'hunt'; targetArg = h.id;
+    return fin();
   }
-  else if (op === 'Wf') {
-    const h = Math.max(6, Math.min(24, parseInt(t.timeFrom) + Number(a)));
-    t.timeFrom = L.hourVal(h);
-    L.fitWindow(t);
-    view = 'when';
+  if (op === 'F' || op === 'T') {
+    const h = H();
+    const cur = parseInt(op === 'F' ? h.timeFrom : h.timeTo);
+    const next = L.hourVal(cur + Number(b2));
+    svc.patchHunt(u, h, op === 'F' ? { timeFrom: next } : { timeTo: next });
+    if (parseInt(h.timeTo) - parseInt(h.timeFrom) === L.MIN_WINDOW) toast = `Окно не короче ${L.MIN_WINDOW} ч — иначе ловить нечего`;
+    target = 'hunt'; targetArg = h.id;
+    return fin();
   }
-  else if (op === 'Wt') {
-    const h = Math.max(parseInt(t.timeFrom) + 1, Math.min(L.MAX_H, parseInt(t.timeTo) + Number(a)));
-    t.timeTo = L.hourVal(h);
-    if (h - parseInt(t.timeFrom) < Math.round(t.dur / 60)) t.dur = 60;
-    view = 'when';
+  if (op === 'N') { const h = H(); svc.patchHunt(u, h, { needed: h.needed + Number(b2) }); target = 'hunt'; targetArg = h.id; return fin(); }
+  if (op === 'I') {
+    const h = H();
+    const i = store.IVS.indexOf(Number(h.interval));
+    svc.patchHunt(u, h, { interval: store.IVS[(i + 1) % store.IVS.length] });
+    toast = `Проверяю каждые ${h.interval} с`;
+    target = 'hunt'; targetArg = h.id;
+    return fin();
   }
-  else if (op === 'Sp') { t.split = t.split === false; hunt.pruneOffers(s); s.seen = {}; view = 'when'; }
-  else if (op === 'Iv') {
-    const opts = [10, 15, 30, 60];
-    t.interval = opts[(opts.indexOf(Number(t.interval) || 10) + 1) % opts.length];
-    view = 'when';
+  if (op === 'Y') { const h = H(); svc.patchHunt(u, h, { type: b2, courts: [] }); target = 'hunt'; targetArg = h.id; return fin(); }
+  if (op === 'C') {
+    const h = H(), n = Number(b2);
+    const courts = n === 0 ? [] : (h.courts.includes(n) ? h.courts.filter(x => x !== n) : [...h.courts, n].sort());
+    svc.patchHunt(u, h, { courts });
+    target = 'hunt'; targetArg = h.id;
+    return fin();
   }
-  else if (op === 'Du') { t.dur = Number(a); L.fitWindow(t); hunt.pruneOffers(s); s.seen = {}; view = 'when'; }
-  else if (op === 'N') { t.needed = Math.max(1, Math.min(10, t.needed + Number(a))); view = 'when'; }
-  else if (op === 'Ft') { t.type = a; t.courts = []; hunt.pruneOffers(s); s.seen = {}; view = 'filters'; }
-  else if (op === 'Fc') {
-    const n = Number(a);
-    t.courts = n === 0 ? [] : (t.courts.includes(n) ? t.courts.filter(x => x !== n) : [...t.courts, n].sort());
-    view = 'filters';
-  }
-  else if (op === 'Fm') { t.mode = a; hunt.pruneOffers(s); view = 'filters'; }
-  else if (op === 'P') {
-    s.pending = { chat, field: a };
-    const ask = a === 'phone' ? 'Пришлите номер: 705 123 45 67 (+7 добавлю сам)'
-      : a === 'email' ? 'Пришлите почту (или «-», чтобы оставить пустой)'
-      : 'Как записать? Пришлите имя и фамилию';
-    await tg.send(chat, '✏️ ' + ask);
+  if (op === 'M') { const h = H(); svc.patchHunt(u, h, { mode: b2 }); target = 'hunt'; targetArg = h.id; return fin(); }
+
+  // ---- контакты ----
+  if (op === 'PA') {
+    if ((u.contacts || []).length >= store.MAX_CONTACTS) return tg.answerCb(cb.id, `Максимум ${store.MAX_CONTACTS}`);
+    svc.setContact(u, (u.contacts || []).length, { name: '', phone: '' });
+    const i = u.contacts.length - 1;
+    u.pending = { field: 'name', ci: i };
+    await store.saveUser(u);
+    await tg.send(chat, '✏️ Как записать? Пришлите имя и фамилию');
     return tg.answerCb(cb.id, '');
   }
-  else if (op === 'AB') { // включить/выключить бота целиком
-    if (!admin) return tg.answerCb(cb.id, 'Только для владельца');
-    s.botOn = a === 'on';
-    if (!s.botOn) s.task.active = false;
-    store.log(s, s.botOn ? 'Владелец включил бота' : 'Владелец выключил бота');
-    await show('admin');
-    return tg.answerCb(cb.id, s.botOn ? 'Бот включён 🟢' : 'Бот выключен 🔴');
+  if (op === 'PE') { target = 'contact'; targetArg = Number(a); return fin(); }
+  if (op === 'PD') {
+    svc.delContact(u, Number(a));
+    toast = 'Удалил'; target = 'contacts';
+    return fin();
   }
-  else if (op === 'A') { // отключить чат (только владелец)
-    if (!admin) return tg.answerCb(cb.id, 'Только для владельца');
-    const id = Number(a);
-    const gone = (s.chats || []).find(c => c.id === id);
-    s.chats = (s.chats || []).filter(c => c.id !== id);
-    store.log(s, `Владелец отключил чат ${gone ? (gone.name || id) : id}`);
-    if (gone) await tg.send(id, '🚪 Доступ к боту закрыт владельцем. Если это ошибка — напишите ему.');
-    await show('admin');
-    return tg.answerCb(cb.id, 'Отключил');
+  if (op === 'P') {
+    u.pending = { field: b2, ci: Number(a) };
+    await store.saveUser(u);
+    await tg.send(chat, '✏️ ' + (b2 === 'phone' ? 'Пришлите номер: 705 123 45 67 (+7 добавлю сам)'
+      : b2 === 'email' ? 'Пришлите почту (или «-», чтобы оставить пустой)' : 'Как записать? Пришлите имя и фамилию'));
+    return tg.answerCb(cb.id, '');
   }
-  else if (op === 'b') { // забрать предложенный слот
-    const r = await hunt.takeOffer(s, a);
+
+  // ---- предложения и брони ----
+  if (op === 'b') {
+    const r = await hunt.takeOffer(u, a);
+    await store.saveUser(u);
     if (!r.ok) await tg.send(chat, '⚠️ ' + r.why);
     return tg.answerCb(cb.id, r.ok ? 'Есть! Забронировал 🎾' : 'Не вышло');
   }
-  else if (op === 'sk') { // пропустить предложение
-    hunt.dropOffer(s, a);
+  if (op === 'sk') {
+    hunt.dropOffer(u, a);
+    await store.saveUser(u);
     await tg.edit(chat, msgId, ((cb.message && cb.message.text) || 'Предложение') + '\n\n✖️ Пропущено', {});
     return tg.answerCb(cb.id, 'Ок, пропустил');
   }
-  else if (op === 'c') { // отмена брони
-    const r = await hunt.doCancel(s, a);
+  if (op === 'c') {
+    const r = await hunt.doCancel(u, a);
+    await store.saveUser(u);
     if (r.ok) {
-      await hunt.sendAll(s, `↩️ Бронь отменена: ${hunt.courtTitle(r.b, r.b.name)} · ${L.whenText(r.b.start, r.b.dur)}\nСлот снова свободен на сайте.`);
+      await hunt.alertAdmin(u, `↩️ <b>${hunt.who(u)}</b> отменил: ${hunt.courtTitle(r.b, r.b.name)} · ${L.whenText(r.b.start, 60)}`);
+      await tg.send(chat, `↩️ Бронь отменена: ${hunt.courtTitle(r.b, r.b.name)} · ${L.whenText(r.b.start, 60)}\nСлот снова свободен на сайте.`);
       return tg.answerCb(cb.id, 'Отменил ✅');
     }
     await tg.send(chat, '⚠️ ' + r.why);
     return tg.answerCb(cb.id, 'Не получилось');
   }
 
-  if (view) await show(view);
-  return tg.answerCb(cb.id, toast);
+  // ---- админ ----
+  if (op === 'AB') {
+    if (!u.isAdmin) return tg.answerCb(cb.id, 'Только для владельца');
+    g.botOn = a === 'on';
+    store.log(g, g.botOn ? 'Владелец включил бота' : 'Владелец выключил бота');
+    if (!g.botOn) {
+      const users = await store.loadUsers(g.users || []);
+      for (const t of users) { for (const h of t.hunts) h.active = false; await store.saveUser(t); }
+      await chain.drop();
+    }
+    toast = g.botOn ? 'Бот включён 🟢' : 'Бот выключен 🔴';
+    target = 'admin';
+    return fin();
+  }
+  if (op === 'AS') {
+    if (!u.isAdmin) return tg.answerCb(cb.id, 'Только для владельца');
+    const t = await store.loadUser(Number(a));
+    if (t) {
+      svc.bind(g, t);
+      for (const h of t.hunts) if (h.active) { h.active = false; store.log(t, 'Охота остановлена владельцем', 1); }
+      await store.saveUser(t);
+      await hunt.sendTo(t, '⏹ Владелец остановил вашу охоту.');
+    }
+    toast = 'Остановил'; target = 'admin';
+    return fin();
+  }
+  if (op === 'A') {
+    if (!u.isAdmin) return tg.answerCb(cb.id, 'Только для владельца');
+    const r2 = svc.userRow(g, Number(a));
+    if (!r2 || r2.uid === g.adminUid) return tg.answerCb(cb.id, 'Так нельзя');
+    r2.blocked = !r2.blocked;
+    const t = await store.loadUser(r2.uid);
+    if (t) {
+      svc.bind(g, t);
+      if (r2.blocked) for (const h of t.hunts) h.active = false;
+      await store.saveUser(t);
+      await hunt.sendTo(t, r2.blocked ? '🚪 Доступ к боту закрыт владельцем. Если это ошибка — напишите ему.' : '🔓 Доступ снова открыт — /menu');
+    }
+    store.log(g, `${r2.blocked ? 'Отключил' : 'Вернул'} ${r2.u ? '@' + r2.u : r2.uid}`);
+    toast = r2.blocked ? 'Отключил' : 'Вернул доступ';
+    target = 'admin';
+    return fin();
+  }
+
+  return fin();
 }

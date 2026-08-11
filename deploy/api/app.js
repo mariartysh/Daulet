@@ -1,40 +1,88 @@
-// API панели: логин, состояние, автосохранение, старт/стоп, проверка, отмена.
-const crypto = require('crypto');
+// API мини-приложения. Каждый пользователь видит только свои данные;
+// владелец дополнительно получает админ-раздел. Все действия идут через lib/svc.js —
+// те же самые, что за кнопками в Telegram.
 const store = require('../lib/store');
+const svc = require('../lib/svc');
 const hunt = require('../lib/hunt');
 const chain = require('../lib/chain');
+const alt = require('../lib/altegio');
 const L = require('../lib/logic');
 
-// Поднять мёртвые фоновые ветки (не чаще раза в 20 сек). Состояние должно быть УЖЕ сохранено.
-async function kick(req, s, confirm) {
-  if (!s.task.active || s.botOn === false || !process.env.TICK_KEY) return [];
-  if (Date.now() - (s.kickAt || 0) < 20e3) return [];
-  s.kickAt = Date.now();
-  return chain.revive(req, { confirm: !!confirm });
+const bookView = b => {
+  const d = L.deadlines(b.start);
+  return {
+    id: b.id, title: hunt.courtTitle(b, b.name), when: L.whenText(b.start, 60), start: b.start,
+    price: b.price, online: d.online, phone: d.phone, onName: b.onName || '',
+    midnight: L.hm(b.start) === '00:00' || L.hm(b.start) === '01:00'
+  };
+};
+const offerView = o => ({
+  id: o.id, title: hunt.courtTitle(o, o.name), when: L.whenText(o.start, 60),
+  price: o.price, start: o.start, midnight: L.hm(o.start) === '00:00' || L.hm(o.start) === '01:00'
+});
+
+function huntView(u, h) {
+  return {
+    id: h.id, title: h.title, label: hunt.label(h), active: !!h.active,
+    mode: h.mode, needed: h.needed, type: h.type, courts: h.courts,
+    days: h.days, timeFrom: h.timeFrom, timeTo: h.timeTo, interval: h.interval,
+    goal: hunt.goalSlots(h), booked: hunt.bookedSlots(h),
+    perDay: hunt.dayPlan(h).map(d => ({ iso: d.iso, need: d.need, got: Math.min(d.need, d.got) })),
+    pace: Math.round(hunt.pace(u, h) / 1000),
+    startedAt: h.startedAt, stats: h.stats,
+    bookings: hunt.activeBookings(h).sort((a, b) => a.start - b.start).map(bookView),
+    offers: (h.offers || []).map(offerView)
+  };
 }
 
-const token = pw => crypto.createHash('sha256').update(pw + '|' + (process.env.TICK_KEY || 'salt')).digest('hex');
-
-function normPhone(raw) {
-  let d = String(raw || '').replace(/\D/g, '');
-  if (d.startsWith('8')) d = '7' + d.slice(1);
-  if (d && !d.startsWith('7')) d = '7' + d;
-  d = d.slice(0, 11);
-  return d.length === 11 ? '+' + d : '';
+function initUser(initData) {
+  try { return JSON.parse(new URLSearchParams(initData).get('user') || '{}'); }
+  catch (e) { return {}; }
 }
 
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   if (req.method !== 'POST') return res.status(405).json({ ok: false });
   const body = req.body || {};
-  const s = await store.load();
-  const authed = req.headers['x-auth'] && req.headers['x-auth'] === token(s.password);
+  const g = await store.loadGlobal();
 
-  if (body.action === 'login') {
-    if (body.password === s.password) return res.status(200).json({ ok: true, token: token(s.password) });
-    return res.status(401).json({ ok: false, error: 'Пароль не подошёл' });
+  // ---------- вход ----------
+  if (body.action === 'auth') {
+    let uid = 0, from = null;
+    if (body.initData) {
+      uid = svc.checkInitData(body.initData);
+      if (uid) from = initUser(body.initData);
+    }
+    if (!uid && body.tk) uid = svc.readToken(body.tk);
+    let row = uid ? svc.userRow(g, uid) : null;
+
+    if (uid && !row) {                                   // первый вход из Telegram — нужен пароль
+      if (!body.password) return res.status(200).json({ ok: false, need: 'password', error: 'Пришлите пароль — доступ закрытый' });
+      if (body.password !== g.password) return res.status(200).json({ ok: false, need: 'password', error: 'Пароль не подошёл' });
+      const r = await svc.linkUser(g, from || { id: uid }, (from && from.id) || uid);
+      row = r.row;
+    }
+    if (!uid) {                                          // браузер без Telegram: только владелец по паролю
+      if (body.password && body.password === g.password && g.adminUid) uid = g.adminUid;
+      else return res.status(200).json({ ok: false, need: 'password', error: g.adminUid ? 'Откройте панель кнопкой в боте — так я узнаю, кто вы' : 'Сначала подключитесь в Telegram-боте' });
+      row = svc.userRow(g, uid);
+    }
+    if (row && row.blocked) return res.status(200).json({ ok: false, error: 'Доступ закрыт владельцем' });
+    const u = await store.loadOrCreate(uid, (row && row.chat) || uid);
+    svc.bind(g, u);
+    await store.saveUser(u);
+    return res.status(200).json({ ok: true, token: svc.mkToken(uid), uid, admin: svc.isAdmin(g, uid) });
   }
-  if (!authed) return res.status(401).json({ ok: false, error: 'auth' });
+
+  const uid = svc.readToken(req.headers['x-auth']);
+  if (!uid) return res.status(401).json({ ok: false, error: 'auth' });
+  const row = svc.userRow(g, uid);
+  if (!row || row.blocked) return res.status(401).json({ ok: false, error: 'auth' });
+  const u = await store.loadUser(uid);
+  if (!u) return res.status(401).json({ ok: false, error: 'auth' });
+  svc.bind(g, u);
+  const admin = svc.isAdmin(g, uid);
+  const H = () => svc.findHunt(u, body.huntId || body.id);
 
   try {
     switch (body.action) {
@@ -42,157 +90,185 @@ module.exports = async (req, res) => {
         const bts = await chain.beats().catch(() => ({}));
         const live = chain.aliveList(bts);
         if (!live.length) {
-          const started = await kick(req, s, false);
-          if (started.length) { store.log(s, 'Поднимаю фоновый поиск'); await store.save(s); }
+          const started = await svc.kick(req, u);
+          if (started.length) store.log(u, 'Поднимаю фоновый поиск');
         }
-        const act = hunt.activeBookings(s).sort((a, b) => a.start - b.start);
+        for (const h of u.hunts) if (h.active) L.rollDays(h, Date.now());
+        svc.touch(g, uid);
+        await store.saveGlobal(g);
+        await store.saveUser(u);
         return res.status(200).json({
           ok: true,
-          task: s.task, profile: s.profile, stats: s.stats,
-          tg: (s.chats || []).length,
-          botOn: s.botOn !== false,
-          goalHours: hunt.goalHours(s), bookedHours: hunt.bookedHours(s),
-          perDay: hunt.dayPlan(s).map(d => ({ iso: d.iso, need: d.need, got: Math.min(d.need, d.got) })),
-          pace: Math.round(hunt.pace(s) / 1000),
-          lastTick: s.lastTick || 0,
-          chainAt: s.chainAt || 0,
-          bg: live.length > 0,
-          strands: live,
-          bookings: act.map(b => {
-            const d = L.deadlines(b.start);
-            return { id: b.id, title: hunt.courtTitle(b, b.name), when: L.whenText(b.start, b.dur), start: b.start,
-              price: b.price, online: d.online, phone: d.phone,
-              midnight: L.hm(b.start) === '00:00' };
-          }),
-          offers: (s.offers || []).map(o => ({ id: o.id, title: hunt.courtTitle(o, o.name), when: L.whenText(o.start, o.dur), price: o.price, start: o.start, midnight: L.hm(o.start) === '00:00' })),
-          log: s.log.slice(0, 60)
+          me: { uid, name: u.name, u: u.u, admin },
+          botOn: g.botOn !== false,
+          maxHunts: store.MAX_HUNTS, maxContacts: store.MAX_CONTACTS, intervals: store.IVS,
+          contacts: u.contacts || [],
+          hunts: u.hunts.map(h => huntView(u, h)),
+          bg: live.length > 0, strands: live,
+          lastTick: u.lastTick || 0,
+          banLeft: Math.ceil(alt.banLeft() / 1000),
+          users: (g.users || []).length,
+          log: (u.log || []).slice(0, 60)
         });
       }
-      case 'save': {
-        const before = JSON.stringify({ ...s.task, active: 0 });
-        if (body.task) {
-          const t = { ...s.task, ...body.task };
-          t.active = s.task.active; // запуск только явной командой
-          t.needed = Math.max(1, Math.min(10, Number(t.needed) || 1));
-          t.dayOffsets = (t.dayOffsets || [0]).filter(o => [0, 1, 2].includes(o));
-          if (!t.dayOffsets.length) t.dayOffsets = [0];
-          if (!['any', 'indoor', 'outdoor'].includes(t.type)) t.type = 'any';
-          if (![60, 120].includes(t.dur)) t.dur = 60;
-          if (![10, 15, 30, 60].includes(Number(t.interval))) t.interval = 10;
-          t.interval = Number(t.interval);
-          t.split = t.split !== false;
-          if (t.type === 'any') t.courts = [];
-          L.fitWindow(t);
-          const fchg = JSON.stringify({ ...s.task, active: 0 }) !== JSON.stringify({ ...t, active: 0 });
-          s.task = t;
-          if (fchg) { hunt.pruneOffers(s); s.seen = {}; }
-        }
-        if (body.profile) {
-          s.profile.name = String(body.profile.name || '').slice(0, 60);
-          s.profile.phone = normPhone(body.profile.phone) || String(body.profile.phone || '').slice(0, 20);
-          s.profile.email = String(body.profile.email || '').slice(0, 80);
-        }
-        const changed = JSON.stringify({ ...s.task, active: 0 }) !== before;
-        if (changed && s.task.active && Date.now() - (s.lastPlanPing || 0) > 120e3) {
-          s.lastPlanPing = Date.now();
-          await hunt.sendAll(s, '✏️ <b>План поменяли в панели</b> — ловлю уже по-новому.\n\n' + hunt.statusText(s));
-        }
-        await store.save(s);
-        return res.status(200).json({ ok: true });
+
+      case 'saveHunt': {
+        const h = H();
+        const changed = svc.patchHunt(u, h, body.patch || {});
+        if (changed && h.active) store.log(u, `${hunt.label(h)}: план изменён — ловлю уже по-новому`);
+        await store.saveUser(u);
+        return res.status(200).json({ ok: true, hunt: huntView(u, h) });
       }
-      case 'start': {
-        if (s.botOn === false) return res.status(200).json({ ok: false, error: 'Бот выключен владельцем' });
-        if (!s.profile.phone || !s.profile.name) return res.status(200).json({ ok: false, error: 'Сначала имя и телефон — на кого бронировать?' });
-        if (hunt.leftHours(s) <= 0) return res.status(200).json({ ok: false, error: 'Цель уже набрана — добавьте дней или кортов' });
-        s.task.active = true;
-        s.stats.startedAt = Date.now();
-        s.bo = { fails: 0 };
-        hunt.dropPhantoms(s);
-        s.offers = []; s.seen = {};
-        const iv = Number(s.task.interval) || 10;
-        store.log(s, `Охота запущена: проверка каждые ${iv} с, нужно ${s.task.needed} на каждый день, ${s.task.timeFrom}–${s.task.timeTo}`);
-        await hunt.sendAll(s, `🟢 <b>Охота запущена</b> — из панели.\nПроверяю расписание каждые ${iv} с — Telegram можно закрыть, ищу на сервере.\n\n` + hunt.statusText(s));
-        await hunt.sweep(s).catch(e => store.log(s, 'Первый проход не удался: ' + e.message, 1));
-        s.kickAt = Date.now();
-        await store.save(s);                      // сохраняем ДО запуска веток — иначе они увидят старое состояние
-        await chain.drop();
-        const okA = await chain.spawn(req, 'a', { confirm: true });
-        await chain.spawn(req, 'b', { confirm: false, delay: 20 });
-        if (!okA) {
-          const f = await store.load();
-          store.log(f, 'Фоновая ветка не поднялась — проверьте APP_URL/TICK_KEY и пингер', 1);
-          await store.save(f);
-        }
-        return res.status(200).json({ ok: true, bg: okA });
+      case 'addHunt': {
+        const r = svc.addHunt(u);
+        if (r.ok) await store.saveUser(u);
+        return res.status(200).json(r.ok ? { ok: true, id: r.h.id } : { ok: false, error: r.why });
       }
-      case 'stop': {
-        const was = s.task.active;
-        s.task.active = false;
-        s.chainAt = 0;
-        store.log(s, 'Охота остановлена из панели');
-        if (was) await hunt.sendAll(s, '⏹ <b>Охота остановлена</b> — из панели.\nВключить снова: /menu');
-        await store.save(s);
-        await chain.drop();
-        return res.status(200).json({ ok: true });
-      }
-      case 'cancelBooking': {
-        const r = await hunt.doCancel(s, body.id);
-        if (r.ok) await hunt.sendAll(s, `↩️ <b>Бронь отменена</b> — из панели.\n${hunt.courtTitle(r.b, r.b.name)} · ${L.whenText(r.b.start, r.b.dur)}\nСлот снова свободен на сайте.`);
-        await store.save(s);
+      case 'removeHunt': {
+        const r = svc.removeHunt(u, body.id);
+        if (r.ok) await store.saveUser(u);
         return res.status(200).json(r.ok ? { ok: true } : { ok: false, error: r.why });
       }
-      case 'pulse': {
-        if (s.botOn === false || !s.task.active) return res.status(200).json({ ok: true, idle: true });
-        const minGap = Math.max(3000, hunt.pace(s) - 1500);
-        if (Date.now() - (s.lastPulse || 0) < minGap) return res.status(200).json({ ok: true, skipped: true });
-        s.lastPulse = Date.now(); s.lastTick = Date.now();
-        const r = await hunt.sweep(s);
-        await hunt.noteResult(s, r);
-        await store.save(s);
-        return res.status(200).json({ ok: true, result: r });
+      case 'start': {
+        const h = H();
+        if (body.patch) svc.patchHunt(u, h, body.patch);
+        const r = await svc.startHunt(u, g, h, req, 'панель');
+        return res.status(200).json(r.ok ? { ok: true, bg: r.bg } : { ok: false, error: r.why });
       }
-      case 'reset': {
-        s.bookings = []; s.offers = []; s.seen = {}; s.reminded = {};
-        s.targets = null; s.svcCache = null; s.task.active = false;
-        s.stats = { checks: 0, found: 0, booked: 0, errors: 0, startedAt: 0 };
-        store.log(s, 'Данные о бронях и вариантах очищены');
-        await store.save(s);
+      case 'stop': {
+        const h = H();
+        await svc.stopHunt(u, g, h, req, 'панель');
         return res.status(200).json({ ok: true });
       }
+      case 'contacts': {
+        svc.setContacts(u, body.list);
+        store.log(u, 'Список контактов обновлён');
+        await store.saveUser(u);
+        return res.status(200).json({ ok: true, contacts: u.contacts });
+      }
+      case 'cancelBooking': {
+        const r = await hunt.doCancel(u, body.id);
+        if (r.ok) {
+          await hunt.sendTo(u, `↩️ <b>Бронь отменена</b>\n${hunt.courtTitle(r.b, r.b.name)} · ${L.whenText(r.b.start, 60)}\nСлот снова свободен на сайте.`);
+          await hunt.alertAdmin(u, `↩️ <b>${hunt.who(u)}</b> отменил: ${hunt.courtTitle(r.b, r.b.name)} · ${L.whenText(r.b.start, 60)}`);
+        }
+        await store.saveUser(u);
+        return res.status(200).json(r.ok ? { ok: true } : { ok: false, error: r.why });
+      }
       case 'takeOffer': {
-        const r = await hunt.takeOffer(s, body.id);
-        await store.save(s);
+        const r = await hunt.takeOffer(u, body.id);
+        await store.saveUser(u);
         return res.status(200).json(r.ok ? { ok: true } : { ok: false, error: r.why });
       }
       case 'skipOffer': {
-        hunt.dropOffer(s, body.id);
-        await store.save(s);
+        hunt.dropOffer(u, body.id);
+        await store.saveUser(u);
+        return res.status(200).json({ ok: true });
+      }
+      case 'check': {
+        const h = H();
+        const r = await hunt.sweep(u, h);
+        await hunt.noteResult(u, h, r);
+        await store.saveUser(u);
+        return res.status(200).json({ ok: true, result: r });
+      }
+      case 'reset': {
+        const h = H();
+        svc.sanitize(u, h);
+        h.bookings = [];
+        h.stats = { checks: 0, found: 0, booked: 0, errors: 0 };
+        store.log(u, `${hunt.label(h)}: данные о бронях и вариантах очищены`);
+        await store.saveUser(u);
         return res.status(200).json({ ok: true });
       }
       case 'probe': {
-        const out = { tg: !!process.env.TELEGRAM_TOKEN, tgLinked: (s.chats || []).length, kv: !!process.env.UPSTASH_REDIS_REST_URL };
+        const out = { tg: !!process.env.TELEGRAM_TOKEN, chat: !!u.chat, kv: store.live, users: (g.users || []).length };
         try {
-          const list = await hunt.ensureTargets(s);
+          const list = await hunt.ensureTargets(u);
           out.altegio = true;
           out.courts = list.length;
-          out.matching = list.filter(x => L.courtOk(s.task, x)).length;
+          out.matching = list.filter(x => L.courtOk(u.hunts[0], x)).length;
         } catch (e) { out.altegio = false; out.error = e.message; }
-        await store.save(s);
+        await store.saveUser(u);
         return res.status(200).json({ ok: true, probe: out });
       }
-      case 'check': {
-        if (!s.task.active) return res.status(200).json({ ok: false, error: 'Охота на паузе — сначала запустите' });
-        const r = await hunt.sweep(s);
-        await hunt.noteResult(s, r);
-        await store.save(s);
-        return res.status(200).json({ ok: true, result: r });
+
+      // ---------- админ ----------
+      case 'admin': {
+        if (!admin) return res.status(403).json({ ok: false, error: 'Только для владельца' });
+        const users = await store.loadUsers(g.users || []);
+        return res.status(200).json({
+          ok: true, botOn: g.botOn !== false, password: g.password,
+          list: (g.users || []).map(r => {
+            const x = users.find(y => y.uid === r.uid);
+            return {
+              uid: r.uid, name: r.name, u: r.u, at: r.at, last: r.last, acts: r.acts || 0, blocked: !!r.blocked,
+              contacts: x ? (x.contacts || []).map(c => ({ name: c.name, phone: c.phone })) : [],
+              hunts: x ? x.hunts.map(h => ({
+                id: h.id, label: hunt.label(h), active: !!h.active,
+                booked: hunt.bookedSlots(h), goal: hunt.goalSlots(h),
+                days: h.days, timeFrom: h.timeFrom, timeTo: h.timeTo, interval: h.interval, mode: h.mode,
+                bookings: hunt.activeBookings(h).map(bookView)
+              })) : []
+            };
+          })
+        });
       }
+      case 'adminStop': {
+        if (!admin) return res.status(403).json({ ok: false, error: 'Только для владельца' });
+        const t = await store.loadUser(body.uid);
+        if (!t) return res.status(200).json({ ok: false, error: 'Пользователь не найден' });
+        svc.bind(g, t);
+        for (const h of t.hunts) if (!body.huntId || h.id === body.huntId) {
+          if (h.active) { h.active = false; store.log(t, `${hunt.label(h)}: остановлена владельцем`, 1); }
+        }
+        await store.saveUser(t);
+        await hunt.sendTo(t, '⏹ Владелец остановил охоту.');
+        return res.status(200).json({ ok: true });
+      }
+      case 'adminBlock': {
+        if (!admin) return res.status(403).json({ ok: false, error: 'Только для владельца' });
+        const r2 = svc.userRow(g, body.uid);
+        if (!r2 || r2.uid === g.adminUid) return res.status(200).json({ ok: false, error: 'Так нельзя' });
+        r2.blocked = !!body.on;
+        await store.saveGlobal(g);
+        const t = await store.loadUser(body.uid);
+        if (t) {
+          svc.bind(g, t);
+          if (r2.blocked) for (const h of t.hunts) h.active = false;
+          await store.saveUser(t);
+          await hunt.sendTo(t, r2.blocked ? '🚪 Доступ к боту закрыт владельцем.' : '🔓 Доступ снова открыт — /menu');
+        }
+        return res.status(200).json({ ok: true });
+      }
+      case 'botOn': {
+        if (!admin) return res.status(403).json({ ok: false, error: 'Только для владельца' });
+        g.botOn = !!body.on;
+        store.log(g, g.botOn ? 'Владелец включил бота' : 'Владелец выключил бота');
+        await store.saveGlobal(g);
+        if (!g.botOn) {
+          const users = await store.loadUsers(g.users || []);
+          for (const t of users) { for (const h of t.hunts) h.active = false; await store.saveUser(t); }
+          await chain.drop();
+        }
+        return res.status(200).json({ ok: true });
+      }
+      case 'setPassword': {
+        if (!admin) return res.status(403).json({ ok: false, error: 'Только для владельца' });
+        const pw = String(body.password || '');
+        if (pw.length < 6) return res.status(200).json({ ok: false, error: 'От 6 символов' });
+        g.password = pw;
+        store.log(g, 'Пароль обновлён владельцем');
+        await store.saveGlobal(g);
+        return res.status(200).json({ ok: true });
+      }
+
       default:
         return res.status(400).json({ ok: false, error: 'unknown action' });
     }
   } catch (e) {
-    store.log(s, 'Сбой панели: ' + e.message, 1);
-    await store.save(s);
+    store.log(u, 'Сбой панели: ' + e.message, 1);
+    await store.saveUser(u).catch(() => {});
     return res.status(500).json({ ok: false, error: e.message });
   }
 };
