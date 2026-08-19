@@ -57,6 +57,7 @@ function newHunt(patch) {
     needed: 1,                   // сколько кортов (часов) на каждый выбранный день
     type: 'any',                 // any | indoor | outdoor
     courts: [],                  // номера в рамках типа ([] = любой)
+    cIdx: [],                    // на кого бронировать: номера контактов ([] = все)
     days: [isoToday(0)],         // АБСОЛЮТНЫЕ даты — «завтра» само становится «сегодня» после полуночи
     timeFrom: '18:00', timeTo: '23:00',
     interval: DEF_IV,
@@ -180,7 +181,7 @@ function fixUser(u) {
     .map(c => ({ name: String(c.name || '').slice(0, 60), phone: String(c.phone || '').slice(0, 20), email: String(c.email || '').slice(0, 80) }));
   out.hunts = (Array.isArray(out.hunts) && out.hunts.length ? out.hunts : [newHunt()]).slice(0, MAX_HUNTS).map(h => {
     const n = newHunt(h);
-    delete n.dur; delete n.split; delete n.dayOffsets;           // ушли из модели
+    delete n.dur; delete n.split; delete n.dayOffsets; delete n.actBy;   // ушли из модели / служебное
     if (!Array.isArray(n.days) || !n.days.length) n.days = [isoToday(0)];
     n.days = n.days.filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x)).slice(0, 3).sort();
     if (!n.days.length) n.days = [isoToday(0)];
@@ -189,6 +190,8 @@ function fixUser(u) {
     n.needed = Math.max(1, Math.min(10, Number(n.needed) || 1));
     if (!['any', 'indoor', 'outdoor'].includes(n.type)) n.type = 'any';
     if (n.type === 'any') n.courts = [];
+    n.cIdx = (Array.isArray(n.cIdx) ? n.cIdx : []).map(Number)
+      .filter(x => Number.isInteger(x) && x >= 0 && x < MAX_CONTACTS).sort();
     if (!['auto', 'confirm'].includes(n.mode)) n.mode = 'auto';
     n.stats = Object.assign({ checks: 0, found: 0, booked: 0, errors: 0 }, n.stats || {});
     n.bookings = Array.isArray(n.bookings) ? n.bookings : [];
@@ -203,11 +206,12 @@ function fixUser(u) {
 async function loadUser(uid, maxAge) {
   if (!uid) return null;
   if (!live) { mem.u[uid] = mem.u[uid] ? fixUser(mem.u[uid]) : defUser(uid); return mem.u[uid]; }
-  if (cU[uid] && (dU[uid] || fresh(cUAt, maxAge))) return cU[uid];
+  if (cU[uid] && fresh(cUAt, maxAge)) return cU[uid];
   const raw = await cmd(['GET', UK(uid)]);
   if (!raw) return null;
   let u; try { u = fixUser(JSON.parse(raw)); } catch { u = defUser(uid); }
-  cU[uid] = u; wU[uid] = JSON.stringify(u); cUAt = Date.now();
+  if (cU[uid] && dU[uid]) { try { u = mergeUser(u, cU[uid]); } catch (e) {} }
+  cU[uid] = u; wU[uid] = raw; cUAt = Date.now();
   return u;
 }
 
@@ -223,12 +227,59 @@ async function loadOrCreate(uid, chat) {
 function markDirty(uid) { if (!dU[uid]) dU[uid] = Date.now(); }
 const dirtyFor = uid => dU[uid] ? Date.now() - dU[uid] : 0;
 
-async function saveUser(u) {
+// Что правит человек (панель, бот), а что — фоновый поиск. Фоновый проход живёт до минуты
+// и держит свою копию профиля; без слияния его запись стирала бы всё, что вы сделали
+// за это время (отсюда «новая охота сама удаляется»).
+const PLAN_FIELDS = ['title', 'mode', 'needed', 'type', 'courts', 'cIdx', 'days', 'timeFrom', 'timeTo', 'interval'];
+
+function mergeBookings(mine, theirs) {
+  const out = [];
+  const seen = new Set();
+  for (const b of [...(theirs || []), ...(mine || [])]) {
+    const prev = out.find(x => x.id === b.id);
+    if (!prev) { out.push(Object.assign({}, b)); seen.add(b.id); continue; }
+    if (b.cancelled) prev.cancelled = true;                  // отмену из панели не теряем
+  }
+  return out;
+}
+
+// db — то, что сейчас в базе (правил человек); u — наша копия с результатами поиска.
+function mergeUser(db, u) {
+  u.contacts = db.contacts;                                  // адресная книга — только человек
+  u.pending = db.pending;
+  u.ui = db.ui;
+  const mine = {};
+  for (const h of u.hunts) mine[h.id] = h;
+  u.hunts = (db.hunts || []).map(dh => {
+    const h = mine[dh.id];
+    if (!h) return dh;                                       // охоту добавили, пока мы искали
+    for (const k of PLAN_FIELDS) h[k] = dh[k];                // план — за человеком
+    if (!h.actBy) h.active = dh.active;                       // старт/стоп — тоже, если мы сами не меняли
+    delete h.actBy;
+    h.bookings = mergeBookings(h.bookings, dh.bookings);
+    return h;
+  });
+  const log = [...(u.log || []), ...(db.log || [])];
+  const key = x => x.t + '|' + x.m;
+  const uniq = [];
+  const seen = new Set();
+  for (const x of log.sort((a, b) => b.t - a.t)) { if (seen.has(key(x))) continue; seen.add(key(x)); uniq.push(x); }
+  u.log = uniq;
+  return u;
+}
+
+async function saveUser(u, opts) {
   const now = Date.now();
   for (const h of u.hunts) {
     for (const k of Object.keys(h.seen)) if (h.seen[k] < now - 2 * 86400e3) delete h.seen[k];
     h.offers = (h.offers || []).filter(o => o.start > now + 5 * 60e3).slice(0, 12);
     h.bookings = (h.bookings || []).filter(b => b.start > now - 7 * 86400e3).slice(-60);
+  }
+  if (live && opts && opts.merge) {
+    const raw = await cmd(['GET', UK(u.uid)]).catch(() => null);
+    if (raw && raw !== wU[u.uid]) {                 // кто-то писал после нас — сливаем, а не затираем
+      try { mergeUser(fixUser(JSON.parse(raw)), u); } catch (e) {}
+    }
   }
   u.log = (u.log || []).slice(0, 120);
   cU[u.uid] = u;
@@ -243,14 +294,15 @@ async function loadUsers(list, maxAge) {
   const ids = (list || []).map(x => x.uid || x).filter(Boolean);
   if (!ids.length) return [];
   if (!live) return ids.map(id => mem.u[id]).filter(Boolean).map(fixUser);
-  const need = ids.filter(id => !(cU[id] && (dU[id] || fresh(cUAt, maxAge))));
+  const need = ids.filter(id => !(cU[id] && fresh(cUAt, maxAge)));
   if (need.length) {
     const r = await cmd(['MGET', ...need.map(UK)]);
     (r || []).forEach((raw, i) => {
       const id = need[i];
       if (!raw) return;
       let u; try { u = fixUser(JSON.parse(raw)); } catch { u = defUser(id); }
-      cU[id] = u; wU[id] = JSON.stringify(u);
+      if (cU[id] && dU[id]) { try { u = mergeUser(u, cU[id]); } catch (e) {} }
+      cU[id] = u; wU[id] = raw;
     });
     cUAt = Date.now();
   }

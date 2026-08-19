@@ -24,7 +24,7 @@ const offerView = o => ({
 function huntView(u, h) {
   return {
     id: h.id, title: h.title, label: hunt.label(h), active: !!h.active,
-    mode: h.mode, needed: h.needed, type: h.type, courts: h.courts,
+    mode: h.mode, needed: h.needed, type: h.type, courts: h.courts, cIdx: h.cIdx || [],
     days: h.days, timeFrom: h.timeFrom, timeTo: h.timeTo, interval: h.interval,
     goal: hunt.goalSlots(h), booked: hunt.bookedSlots(h),
     perDay: hunt.dayPlan(h).map(d => ({ iso: d.iso, need: d.need, got: Math.min(d.need, d.got) })),

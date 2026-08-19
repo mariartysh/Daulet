@@ -38,9 +38,9 @@ async function sweepAll() {
     for (const u of users) {
       if (!u.hunts.some(h => h.active)) continue;
       svc.bind(g, u);
-      for (const h of u.hunts) h.active = false;
+      for (const h of u.hunts) { h.active = false; h.actBy = 'budget'; }
       store.log(u, 'Охоты остановлены: израсходован месячный бюджет обращений к базе', 1);
-      await store.saveUser(u);
+      await store.saveUser(u, { merge: true });
       await hunt.sendTo(u, '⚠️ <b>Остановил охоты</b>\nМесячный бюджет обращений к базе исчерпан — иначе бот ляжет целиком.\nОбновится 1-го числа. Можно поднять потолок переменной CMD_BUDGET или перевести базу на платный тариф.').catch(() => {});
     }
     await store.setAct({ h: 0, b: 0 });
@@ -70,7 +70,7 @@ async function sweepAll() {
     if (changed) store.markDirty(u.uid);
     if (important || store.dirtyFor(u.uid) > SAVE_MS) {
       u.lastTick = Date.now();
-      await store.saveUser(u);
+      await store.saveUser(u, { merge: true });      // не затираем правки из панели и бота
     }
   }
   await store.setAct({ h: hAct, b: bAct });

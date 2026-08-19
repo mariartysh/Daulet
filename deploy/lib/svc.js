@@ -141,6 +141,8 @@ function patchHunt(u, h, patch) {
   if (p.needed !== undefined) h.needed = Math.max(1, Math.min(10, Number(p.needed) || 1));
   if (p.type !== undefined && ['any', 'indoor', 'outdoor'].includes(p.type)) { h.type = p.type; if (h.type === 'any') h.courts = []; }
   if (p.courts !== undefined) h.courts = (Array.isArray(p.courts) ? p.courts : []).map(Number).filter(n => n >= 1 && n <= 8).sort();
+  if (p.cIdx !== undefined) h.cIdx = (Array.isArray(p.cIdx) ? p.cIdx : []).map(Number)
+    .filter(n => Number.isInteger(n) && n >= 0 && n < (u.contacts || []).length).sort();
   if (p.days !== undefined) {
     const ok = (Array.isArray(p.days) ? p.days : []).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
     const today = store.isoToday(0);
@@ -177,8 +179,10 @@ async function startHunt(u, g, h, req, src) {
   const running = u.hunts.filter(x => x.active && x.id !== h.id).length;
   if (running >= lim.hunts) return { ok: false, why: `Одновременно можно вести ${lim.hunts} ${lim.hunts === 1 ? 'охоту' : 'охоты'} — остановите одну` };
   if (Number(h.interval) < lim.minInterval) h.interval = lim.minInterval;
-  const ready = (u.contacts || []).filter(c => c.name && c.phone);
-  if (!ready.length) return { ok: false, why: 'Сначала контакт: на кого бронировать? Имя и телефон' };
+  const ready = hunt.huntContacts(u, h);
+  if (!ready.length) return { ok: false, why: (u.contacts || []).some(c => c.name && c.phone)
+    ? 'В этой охоте не выбран контакт — отметьте, на кого бронировать'
+    : 'Сначала контакт: на кого бронировать? Имя и телефон' };
   if (h.needed > 1 && ready.length < 2) {
     // не блокируем, но предупреждаем: несколько кортов на одно имя администрация отменяет
     store.log(u, 'Внимание: несколько кортов на одно имя могут отменить — добавьте второй контакт', 1);
@@ -188,6 +192,7 @@ async function startHunt(u, g, h, req, src) {
   if (hunt.leftSlots(h) <= 0) return { ok: false, why: 'Цель уже набрана — добавьте день или увеличьте число кортов' };
   sanitize(u, h);
   h.active = true;
+  h.actBy = 'user';
   h.startedAt = Date.now();
   store.log(u, `${hunt.label(h)}: охота запущена (${src || 'панель'}) — проверка каждые ${h.interval} с, нужно ${h.needed} на день`);
   await hunt.sweep(u, h).catch(e => store.log(u, 'Первый проход не удался: ' + e.message, 1));
@@ -207,13 +212,14 @@ async function startHunt(u, g, h, req, src) {
 async function stopHunt(u, g, h, req, src) {
   const was = h.active;
   h.active = false;
+  h.actBy = 'user';
   h.offers = [];
   if (was) store.log(u, `${hunt.label(h)}: охота остановлена (${src || 'панель'})`);
   await store.saveUser(u);
   const anyLeft = u.hunts.some(x => x.active);
   if (!anyLeft) {
     const others = await anyoneHunting(g, u.uid);
-    if (!others) await chain.drop();
+    if (!others) { await store.setAct({ h: 0, b: hunt.allActiveBookings(u).length }); await chain.drop(); }
   }
   return { ok: true, was };
 }
@@ -255,6 +261,8 @@ function setContacts(u, list) {
   u.contacts = [];
   (Array.isArray(list) ? list : []).slice(0, store.MAX_CONTACTS).forEach((c, i) => setContact(u, i, c || {}));
   u.contacts = u.contacts.filter((c, i) => i === 0 || c.name || c.phone);
+  const n = u.contacts.length;
+  for (const h of u.hunts || []) h.cIdx = (h.cIdx || []).filter(i => i < n);
   return { ok: true };
 }
 

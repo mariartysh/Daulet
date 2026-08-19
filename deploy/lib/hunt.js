@@ -139,14 +139,14 @@ async function autoStop(u, h) {
   const dropped = L.rollDays(h, Date.now());
   if (dropped) log(u, `${label(h)}: день закончился — «завтра» стало «сегодня», план сдвинулся`);
   if (!h.days.length) {
-    h.active = false;
+    h.active = false; h.actBy = 'bg';
     log(u, `${label(h)}: выбранные дни прошли — охота остановлена`, 1);
     await sendTo(u, `📅 <b>${label(h)}: дни прошли</b>\nВыберите новые дни и запустите снова.`);
     return true;
   }
   if (leftSlots(h) <= 0) { await finishHunt(u, h); return true; }
   if (expired(h)) {
-    h.active = false;
+    h.active = false; h.actBy = 'bg';
     log(u, `${label(h)}: 12 часов поиска — остановлена`, 1);
     await sendTo(u, `⌛ <b>${label(h)}: 12 часов поиска</b>\nПод ваш план ничего не освободилось. Запустите снова или ослабьте фильтр: добавьте дни, расширьте окно, разрешите любой тип корта.`);
     return true;
@@ -306,8 +306,17 @@ function dropOffer(u, id) {
 // ---------- контакты для массовой брони ----------
 // Первый контакт — основной. Второй и следующий корт НА ТО ЖЕ ВРЕМЯ оформляем
 // на следующего человека: администрация отменяет несколько кортов на одно имя.
+// Контакты этой охоты: h.cIdx — номера в адресной книге, пусто = вся книга.
+function huntContacts(u, h) {
+  const all = (u.contacts || []);
+  const pick = (h && Array.isArray(h.cIdx) && h.cIdx.length)
+    ? h.cIdx.map(i => all[i]).filter(Boolean)
+    : all;
+  return pick.filter(c => c && c.name && c.phone);
+}
+
 function contactFor(u, h, startMs) {
-  const list = (u.contacts || []).filter(c => c.name && c.phone);
+  const list = huntContacts(u, h);
   if (!list.length) return null;
   const sameTime = activeBookings(h).filter(b => b.start === startMs).length;
   const used = new Set(activeBookings(h).filter(b => b.start === startMs).map(b => String(b.phone || '')));
@@ -367,7 +376,7 @@ async function doBook(u, h, staffId, serviceId, startMs, rawDatetime) {
   log(u, `Поймал! ${title}, ${L.whenText(startMs, 60)} на ${c.name} ✅`);
 
   const done = leftSlots(h) <= 0;
-  if (done) h.active = false;
+  if (done) { h.active = false; h.actBy = 'bg'; }
   const d = L.deadlines(startMs);
   const sameTime = activeBookings(h).filter(x => x.start === startMs);
   const msg = `🎾 <b>Поймал корт!</b>\n` +
@@ -453,7 +462,7 @@ async function notifyError(u, msg, toAdmin) {
 
 async function finishHunt(u, h) {
   if (h.active) {
-    h.active = false;
+    h.active = false; h.actBy = 'bg';
     log(u, `${label(h)}: всё поймано — охота выключена 🏁`);
     await sendTo(u, `🏁 <b>${label(h)}</b> — цель набрана, охоту выключил.`);
   }
@@ -515,7 +524,7 @@ function dropPhantoms(u) {
 }
 
 module.exports = {
-  HUNT_TTL, CACHE_VER,
+  HUNT_TTL, CACHE_VER, huntContacts,
   ensureTargets, pickService, activeBookings, allActiveBookings,
   dayPlan, goalSlots, bookedSlots, leftSlots, leftForDay,
   pace, noteResult, expired, autoStop, courtTitle, label, huntLine, statusText,

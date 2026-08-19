@@ -169,6 +169,11 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
       </div>
     </div>
     <div class="sub" id="fitHint"></div>
+    <div>
+      <label>На кого бронировать в этой охоте</label>
+      <div class="chips g2" id="huntC"></div>
+      <div class="sub" id="huntCHint" style="margin-top:8px"></div>
+    </div>
   </div>
 
   <button class="fold" id="extraFold" onclick="toggleFold('extra','extraFold')"><span>🎛</span><span>Дополнительные фильтры</span><span class="car">▾</span></button>
@@ -191,6 +196,11 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
       <div class="chips g5" id="interval"></div>
       <div class="sub" style="margin-top:8px">Чем чаще — тем выше шанс опередить чужих ботов. Если сайт начнёт ограничивать (429), сам сбавлю темп и вернусь, когда отпустит.</div>
     </div>
+  </div>
+
+  <div class="card" id="applyCard">
+    <button class="cta" id="applyBtn" onclick="applyHunt()">Обновить данные охоты</button>
+    <div class="sub" id="applyHint"></div>
   </div>
 
   <div class="card">
@@ -323,6 +333,29 @@ function toggleFold(id,foldId){const el=$(id),open=el.style.display!=='none';el.
 
 // ---------- работа с выбранной охотой ----------
 const H=()=>{ if(!S)return null; return S.hunts.find(h=>h.id===HID)||S.hunts[0]||null; };
+// Правки не уходят на сервер сразу: складываем их в черновик и ждём кнопку
+// «Обновить данные охоты». Активная охота до этого продолжает работать по старому плану.
+const DR={};
+const draftOf=h=>(h&&DR[h.id])||null;
+const hasDraft=h=>{const d=draftOf(h);return !!(d&&Object.keys(d).length);};
+const VIEW=()=>{const h=H();return h?Object.assign({},h,DR[h.id]||{}):null;};
+function edit(p){
+  const h=H();if(!h)return;
+  DR[h.id]=Object.assign({},DR[h.id]||{},p);
+  for(const k of Object.keys(DR[h.id]))if(JSON.stringify(DR[h.id][k])===JSON.stringify(h[k]))delete DR[h.id][k];
+  render();
+}
+async function applyHunt(){
+  const h=H();if(!h)return;
+  const d=DR[h.id]||{};
+  if(!Object.keys(d).length)return toast('Изменений нет');
+  const r=await api('saveHunt',{huntId:h.id,patch:d});
+  if(!r.ok)return toast(r.error||'Не вышло');
+  delete DR[h.id];
+  if(r.hunt)Object.assign(h,r.hunt);
+  buzz('success');markSaved();render();
+  toast(h.active?'Обновил — ловлю уже по-новому':'Данные охоты обновлены');
+}
 function markSaved(){$('saveMark').classList.add('show');setTimeout(()=>$('saveMark').classList.remove('show'),1800);}
 function patch(p,instant){
   const h=H();if(!h)return;
@@ -348,14 +381,20 @@ const isoWord=iso=>{const off=Math.round((Date.parse(iso+'T00:00:00Z')-Date.pars
   return ['сегодня','завтра','послезавтра'][off]||iso.slice(8,10)+'.'+iso.slice(5,7)};
 
 function chips(el,items,get,set){
-  el.innerHTML='';
-  items.forEach(([v,l])=>{const b=document.createElement('button');b.className='chip'+(get(v)?' on':'');b.textContent=l;
-    b.onclick=()=>{buzz('select');set(v);};el.appendChild(b);});
+  const key=items.map(x=>x[0]+':'+x[1]).join('|');
+  if(el.dataset.key!==key){
+    el.dataset.key=key;el.innerHTML='';
+    items.forEach(([v,l])=>{const b=document.createElement('button');b.className='chip';b.textContent=l;
+      b.onclick=()=>{buzz('select');(el._set||(()=>{}))(v);};el.appendChild(b);});
+  }
+  el._set=set;
+  items.forEach(([v],i)=>{const b=el.children[i];if(b)b.classList.toggle('on',!!get(v));});
 }
 
 function render(){
   if(!S)return;
-  const h=H();
+  const real=H();
+  const h=VIEW();
   // вкладки охот
   const tb=$('tabs');tb.innerHTML='';
   S.hunts.forEach((x,i)=>{
@@ -363,6 +402,7 @@ function render(){
     b.className='tab'+(x.id===(h&&h.id)?' on':'');
     b.innerHTML=(x.active?'<span class="dot"></span>':'')+esc(x.title||('Охота '+(i+1)))+' <span style="opacity:.6">'+x.booked+'/'+x.goal+'</span>';
     b.onclick=()=>{HID=x.id;render();};
+    if(hasDraft(x))b.innerHTML+=' <span style="opacity:.6">•</span>';
     tb.appendChild(b);
   });
   if(S.hunts.length<(S.maxHunts||3)){
@@ -376,9 +416,9 @@ function render(){
   chips($('days'),[0,1,2].map(o=>[isoOf(o),dayLabel(o)]),v=>h.days.includes(v),v=>{
     const nx=h.days.includes(v)?h.days.filter(x=>x!==v):[...h.days,v].sort();
     if(!nx.length)return toast('Хотя бы один день нужен');
-    patch({days:nx});
+    edit({days:nx});
   });
-  chips($('type'),[['any','Любой'],['indoor','Крытый'],['outdoor','Открытый']],v=>h.type===v,v=>patch({type:v,courts:[]}));
+  chips($('type'),[['any','Любой'],['indoor','Крытый'],['outdoor','Открытый']],v=>h.type===v,v=>edit({type:v,courts:[]}));
   if(h.type==='any'){$('courtsHint').style.display='';$('courts').innerHTML='';}
   else{
     $('courtsHint').style.display='none';
@@ -386,11 +426,29 @@ function render(){
     const items=[[0,'Любой №'],...Array.from({length:maxN},(_,i)=>[i+1,'№'+(i+1)])];
     chips($('courts'),items,v=>v===0?h.courts.length===0:h.courts.includes(v),v=>{
       const nx=v===0?[]:(h.courts.includes(v)?h.courts.filter(x=>x!==v):[...h.courts,v].sort());
-      patch({courts:nx});
+      edit({courts:nx});
     });
   }
-  chips($('mode'),[['auto','Бронить сразу'],['confirm','Сначала спросить']],v=>h.mode===v,v=>patch({mode:v},true));
-  chips($('interval'),(S.intervals||[2,3,5,7,10]).map(v=>[v,v+' с']),v=>Number(h.interval)===v,v=>patch({interval:v},true));
+  const dirty=hasDraft(real);
+  $('applyBtn').disabled=!dirty;
+  $('applyBtn').style.opacity=dirty?'1':'.45';
+  $('applyBtn').textContent=dirty?'Обновить данные охоты':'Данные охоты актуальны';
+  $('applyHint').textContent=dirty
+    ?(real.active?'Охота пока работает по прежнему плану. Нажмите — и переключу её на новые настройки.'
+                 :'Изменения ещё не сохранены — нажмите кнопку.')
+    :'Меняйте дни, время и фильтры сколько нужно: применю только по этой кнопке.';
+
+  const cl=(S.contacts||[]).map((c,i)=>[i,c]).filter(([i,c])=>c.name&&c.phone);
+  const cSel=Array.isArray(h.cIdx)?h.cIdx:[];
+  chips($('huntC'),[[-1,'Все контакты'],...cl.map(([i,c])=>[i,c.name||('№'+(i+1))])],
+    v=>v===-1?cSel.length===0:cSel.includes(v),
+    v=>{const nx=v===-1?[]:(cSel.includes(v)?cSel.filter(x=>x!==v):[...cSel,v].sort((a,b)=>a-b));edit({cIdx:nx});});
+  $('huntCHint').textContent=!cl.length
+    ?'Контактов пока нет — добавьте ниже, в «На кого бронируем».'
+    :(cSel.length?'Эта охота бронирует только на: '+cSel.map(i=>(S.contacts[i]||{}).name||('№'+(i+1))).join(', ')
+                 :'Эта охота бронирует на любой из '+cl.length+' контактов. У каждой охоты выбор свой.');
+  chips($('mode'),[['auto','Бронить сразу'],['confirm','Сначала спросить']],v=>h.mode===v,v=>edit({mode:v}));
+  chips($('interval'),(S.intervals||[2,3,5,7,10]).map(v=>[v,v+' с']),v=>Number(h.interval)===v,v=>edit({interval:v}));
 
   let of='',ot='';
   for(let x=6;x<=24;x++)of+='<option value="'+HV(x)+'" '+(HV(x)===h.timeFrom?'selected':'')+'>'+HL(x)+'</option>';
@@ -555,9 +613,9 @@ function delContact(i){
   saveContacts();
 }
 
-function stepN(d){const h=H();if(!h)return;buzz('select');patch({needed:Math.max(1,Math.min(10,h.needed+d))});}
-$('timeFrom').addEventListener('change',()=>patch({timeFrom:$('timeFrom').value},true));
-$('timeTo').addEventListener('change',()=>patch({timeTo:$('timeTo').value},true));
+function stepN(d){const v=VIEW();if(!v)return;buzz('select');edit({needed:Math.max(1,Math.min(10,v.needed+d))});}
+$('timeFrom').addEventListener('change',()=>edit({timeFrom:$('timeFrom').value}));
+$('timeTo').addEventListener('change',()=>edit({timeTo:$('timeTo').value}));
 
 async function addHunt(){
   const r=await api('addHunt');
@@ -577,7 +635,8 @@ async function toggleHunt(){
     const r=await api('stop',{huntId:h.id});
     buzz('warning');toast(r.ok?'Остановил — и в Telegram тоже':'Не вышло');
   }else{
-    const r=await api('start',{huntId:h.id});
+    const r=await api('start',{huntId:h.id,patch:DR[h.id]||{}});
+    if(r.ok)delete DR[h.id];
     if(r.ok){buzz('success');toast('Погнали! Проверяю каждые '+h.interval+' секунд 🎾');}
     else{buzz('error');toast(r.error||'Не получилось');}
   }
