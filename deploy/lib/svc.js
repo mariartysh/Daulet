@@ -65,7 +65,9 @@ async function linkUser(g, from, chat) {
 
 function touch(g, uid) {
   const r = userRow(g, uid);
-  if (r) { r.last = Date.now(); r.acts = (r.acts || 0) + 1; }
+  if (!r) return;
+  if (Date.now() - (r.last || 0) < 300000) return;   // не пишем базу на каждый опрос панели
+  r.last = Date.now(); r.acts = (r.acts || 0) + 1;
 }
 
 // ---------- телефон ----------
@@ -164,6 +166,7 @@ async function startHunt(u, g, h, req, src) {
   await hunt.sweep(u, h).catch(e => store.log(u, 'Первый проход не удался: ' + e.message, 1));
   u.kickAt = Date.now();
   await store.saveUser(u);
+  await store.setAct({ h: 1, b: 1 });          // чтобы пингер сразу знал: есть что вести
   await chain.drop();
   const okA = await chain.spawn(req, 'a', { confirm: true });
   await chain.spawn(req, 'b', { confirm: false, delay: 20 });

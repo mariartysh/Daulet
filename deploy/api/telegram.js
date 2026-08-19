@@ -33,8 +33,17 @@ const COMMANDS = [
 module.exports = async (req, res) => {
   if (process.env.TG_SECRET && req.headers['x-telegram-bot-api-secret-token'] !== process.env.TG_SECRET)
     return res.status(401).json({ ok: false });
-  const upd = req.body || {};
-  const g = await store.loadGlobal();
+  let upd = req.body || {};
+  if (typeof upd === 'string') { try { upd = JSON.parse(upd); } catch { upd = {}; } }
+  let g;
+  try { g = await store.loadGlobal(); }
+  catch (e) {
+    // База недоступна — отвечаем 200 (иначе Telegram копит очередь) и говорим человеку, что случилось.
+    const chat = (upd.message && upd.message.chat && upd.message.chat.id)
+      || (upd.callback_query && upd.callback_query.message && upd.callback_query.message.chat.id);
+    if (chat) await tg.send(chat, '⚠️ Не могу прочитать базу — сервер отвечает ошибкой.\n<code>' + String(e.message).slice(0, 120) + '</code>\nПроверьте переменные хранилища в Vercel и откройте /api/health.').catch(() => {});
+    return res.status(200).json({ ok: true, storeDown: true });
+  }
   try {
     if (upd.message && upd.message.text) await onMessage(g, upd.message, req);
     else if (upd.callback_query) await onCallback(g, upd.callback_query, req);

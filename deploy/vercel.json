@@ -1,9 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/tick.js": { "maxDuration": 60 },
-    "api/telegram.js": { "maxDuration": 30 },
-    "api/app.js": { "maxDuration": 30 }
+    "api/tick.js": { "maxDuration": 60, "memory": 256 },
+    "api/telegram.js": { "maxDuration": 30, "memory": 512 },
+    "api/app.js": { "maxDuration": 30, "memory": 512 },
+    "api/health.js": { "maxDuration": 15, "memory": 256 },
+    "api/diag.js": { "maxDuration": 30, "memory": 512 }
   },
   "crons": [
     { "path": "/api/tick?job=summary", "schedule": "0 4 * * *" }

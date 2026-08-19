@@ -284,7 +284,16 @@ async function api(action,extra){
   try{ r=await fetch('/api/app',{method:'POST',headers:{'Content-Type':'application/json','x-auth':TOKEN},body:JSON.stringify({action,...(extra||{})})}); }
   catch(e){ return {ok:false,error:'Нет связи с сервером'}; }
   if(r.status===401&&action!=='auth'){ TOKEN='';stg.set('ch_token','');showGate('Нужно войти заново'); return {ok:false}; }
-  return r.json().catch(()=>({ok:false,error:'Сервер ответил непонятно'}));
+  const raw=await r.text().catch(()=>'');
+  try{ return JSON.parse(raw); }
+  catch(e){
+    const hint=/exceeded|limit/i.test(raw)?'Vercel остановил функции — превышен лимит бесплатного плана'
+      :/FUNCTION_INVOCATION_TIMEOUT|504/i.test(raw+r.status)?'Сервер не ответил за отведённое время'
+      :/FUNCTION_INVOCATION_FAILED|500/i.test(raw+r.status)?'Функция упала при запуске — проверьте переменные окружения'
+      :/DEPLOYMENT_NOT_FOUND|404/i.test(raw+r.status)?'Такого адреса нет — деплой удалён или переименован'
+      :'Сервер вернул не JSON';
+    return {ok:false,error:`${hint} (код ${r.status})`,detail:raw.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim().slice(0,180)};
+  }
 }
 function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';clearTimeout(t._h);t._h=setTimeout(()=>t.style.display='none',3400);}
 
@@ -303,10 +312,10 @@ async function doAuth(pw){
     $('gate').style.display='none';
     document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');
     refresh();
-    if(!window.__loop){window.__loop=setInterval(refresh,7000);}
+    if(!window.__loop){window.__loop=setInterval(refresh,15000);}
     return true;
   }
-  if(pw===undefined){buzz('error');$('pwErr').textContent=r.error||'Не вышло войти';$('pwErr').style.display='block';}
+  if(pw===undefined){buzz('error');$('pwErr').textContent=(r.error||'Не вышло войти')+(r.detail?' · '+r.detail:'');$('pwErr').style.display='block';}
   return false;
 }
 $('pw').addEventListener('keydown',e=>{if(e.key==='Enter')doAuth()});

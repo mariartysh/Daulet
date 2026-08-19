@@ -43,8 +43,14 @@ function initUser(initData) {
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   if (req.method !== 'POST') return res.status(405).json({ ok: false });
-  const body = req.body || {};
-  const g = await store.loadGlobal();
+  let body = req.body || {};
+  if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }
+  let g;
+  try { g = await store.loadGlobal(); }
+  catch (e) {
+    const msg = store.live ? 'База не отвечает: ' + e.message : 'Хранилище не настроено — задайте UPSTASH_REDIS_REST_URL и TOKEN';
+    return res.status(200).json(Object.assign({ ok: false, error: msg }, body.action === 'auth' ? { need: 'password' } : {}));
+  }
 
   // ---------- вход ----------
   if (body.action === 'auth') {

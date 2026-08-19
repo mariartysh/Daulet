@@ -11,9 +11,22 @@ const UK = uid => `ch:u:${uid}`;
 const HB = k => `ch:hb:${k}`;
 const OLD = 'autobook:state';
 const live = !!(URL_ && TOK);
-let mem = { g: null, u: {}, hb: {} };
+let mem = { g: null, u: {}, hb: {}, act: '' };
+
+// ---------- экономия команд ----------
+// Один вызов функции живёт до минуты и раньше дёргал базу на каждом шаге цикла.
+// Теперь свежие данные держим в памяти вызова, пишем только изменившееся,
+// а «есть ли вообще активные охоты» узнаём одним коротким ключом ch:act.
+const ACT = 'ch:act';
+let cG = null, cGAt = 0, wG = '';            // кэш глобального и последняя запись
+let cU = {}, cUAt = 0, wU = {}, dU = {};     // кэш пользователей, записанное, несохранённые
+let lastBeat = {}, lastAct = '';
+let cnt = 0, folded = 0;                     // сколько команд отправил этот вызов и сколько из них уже учтено
+const BUDGET = Number(process.env.CMD_BUDGET || 400000);
+const fresh = (at, maxAge) => !!(maxAge && at && Date.now() - at < maxAge);
 
 async function cmd(arr) {
+  cnt++;
   const r = await fetch(URL_, {
     method: 'POST',
     headers: { Authorization: `Bearer ${TOK}`, 'Content-Type': 'application/json' },
@@ -81,8 +94,30 @@ function defUser(uid, chat) {
   };
 }
 
+// ---------- счётчик команд (чтобы не упереться в лимит молча) ----------
+// Свой счёт ведём в памяти и прикладываем к глобальному состоянию в момент, когда его и так записываем —
+// отдельных обращений к базе счётчик не стоит. Цифра оценочная, но близкая.
+const month = () => new Date().toISOString().slice(0, 7);
+function fold(g) {
+  if (!g.cmd || g.cmd.m !== month()) { g.cmd = { m: month(), n: 0 }; folded = cnt; return g; }
+  g.cmd.n += Math.max(0, cnt - folded);
+  folded = cnt;
+  return g;
+}
+const used = g => (g && g.cmd && g.cmd.m === month() ? g.cmd.n : 0) + Math.max(0, cnt - folded);
+const budget = () => BUDGET;
+const overBudget = g => BUDGET > 0 && used(g) > BUDGET;
+
 // ---------- глобальное ----------
-async function loadGlobal() {
+// maxAge — сколько миллисекунд можно отдавать копию из памяти вызова (0 = всегда читать базу)
+async function loadGlobal(maxAge) {
+  if (cG && fresh(cGAt, maxAge)) return cG;
+  const g = await readGlobal();
+  cG = g; cGAt = Date.now();
+  return g;
+}
+
+async function readGlobal() {
   if (!live) { mem.g = mem.g || defGlobal(); return mem.g; }
   const raw = await cmd(['GET', G]);
   if (raw) { try { return Object.assign(defGlobal(), JSON.parse(raw)); } catch {} }
@@ -128,8 +163,13 @@ async function loadGlobal() {
 
 async function saveGlobal(g) {
   g.log = (g.log || []).slice(0, 80);
+  fold(g);
+  cG = g; cGAt = Date.now();
   if (!live) { mem.g = g; return; }
-  await cmd(['SET', G, JSON.stringify(g)]);
+  const json = JSON.stringify(g);
+  if (json === wG) return;                   // ничего не изменилось — не тратим команду
+  await cmd(['SET', G, json]);
+  wG = json;
 }
 
 // ---------- пользователи ----------
@@ -160,12 +200,15 @@ function fixUser(u) {
   return out;
 }
 
-async function loadUser(uid) {
+async function loadUser(uid, maxAge) {
   if (!uid) return null;
   if (!live) { mem.u[uid] = mem.u[uid] ? fixUser(mem.u[uid]) : defUser(uid); return mem.u[uid]; }
+  if (cU[uid] && (dU[uid] || fresh(cUAt, maxAge))) return cU[uid];
   const raw = await cmd(['GET', UK(uid)]);
   if (!raw) return null;
-  try { return fixUser(JSON.parse(raw)); } catch { return defUser(uid); }
+  let u; try { u = fixUser(JSON.parse(raw)); } catch { u = defUser(uid); }
+  cU[uid] = u; wU[uid] = JSON.stringify(u); cUAt = Date.now();
+  return u;
 }
 
 async function loadOrCreate(uid, chat) {
@@ -176,6 +219,10 @@ async function loadOrCreate(uid, chat) {
   return u;
 }
 
+// Пометить, что копия в памяти изменилась и ждёт записи
+function markDirty(uid) { if (!dU[uid]) dU[uid] = Date.now(); }
+const dirtyFor = uid => dU[uid] ? Date.now() - dU[uid] : 0;
+
 async function saveUser(u) {
   const now = Date.now();
   for (const h of u.hunts) {
@@ -184,25 +231,34 @@ async function saveUser(u) {
     h.bookings = (h.bookings || []).filter(b => b.start > now - 7 * 86400e3).slice(-60);
   }
   u.log = (u.log || []).slice(0, 120);
+  cU[u.uid] = u;
   if (!live) { mem.u[u.uid] = u; return; }
-  await cmd(['SET', UK(u.uid), JSON.stringify(u)]);
+  const json = JSON.stringify(u);
+  if (json === wU[u.uid]) { dU[u.uid] = 0; return; }   // нечего писать
+  await cmd(['SET', UK(u.uid), json]);
+  wU[u.uid] = json; dU[u.uid] = 0;
 }
 
-async function loadUsers(list) {
+async function loadUsers(list, maxAge) {
   const ids = (list || []).map(x => x.uid || x).filter(Boolean);
   if (!ids.length) return [];
   if (!live) return ids.map(id => mem.u[id]).filter(Boolean).map(fixUser);
-  const r = await cmd(['MGET', ...ids.map(UK)]);
-  const out = [];
-  (r || []).forEach((raw, i) => {
-    if (!raw) return;
-    try { out.push(fixUser(JSON.parse(raw))); } catch { out.push(defUser(ids[i])); }
-  });
-  return out;
+  const need = ids.filter(id => !(cU[id] && (dU[id] || fresh(cUAt, maxAge))));
+  if (need.length) {
+    const r = await cmd(['MGET', ...need.map(UK)]);
+    (r || []).forEach((raw, i) => {
+      const id = need[i];
+      if (!raw) return;
+      let u; try { u = fixUser(JSON.parse(raw)); } catch { u = defUser(id); }
+      cU[id] = u; wU[id] = JSON.stringify(u);
+    });
+    cUAt = Date.now();
+  }
+  return ids.map(id => cU[id]).filter(Boolean);
 }
 
 async function dropUser(uid) {
-  delete mem.u[uid];
+  delete mem.u[uid]; delete cU[uid]; delete wU[uid]; delete dU[uid];
   if (live) await cmd(['DEL', UK(uid)]);
 }
 
@@ -215,7 +271,26 @@ function log(target, m, warn) {
 // ---------- сердцебиение фоновых веток ----------
 async function setBeat(k, run, ttlSec) {
   if (!live) { mem.hb[k] = { at: Date.now(), run }; return; }
+  const key = k + ':' + run;
+  if (lastBeat[key] && Date.now() - lastBeat[key] < 12000) return;   // ветка считается живой 45 с — чаще отмечаться незачем
+  lastBeat[key] = Date.now();
   await cmd(['SET', HB(k), JSON.stringify({ at: Date.now(), run }), 'EX', String(ttlSec || 120)]);
+}
+
+// Короткий ключ активности: {h: активных охот, b: живых броней}.
+// Пока он равен нулям, минутный пингер не читает ни глобальное состояние, ни пользователей.
+async function setAct(v) {
+  const s = JSON.stringify({ h: (v && v.h) | 0, b: (v && v.b) | 0 });
+  if (s === lastAct) return;
+  lastAct = s;
+  if (!live) { mem.act = s; return; }
+  await cmd(['SET', ACT, s]);
+}
+async function getAct() {
+  try {
+    const r = live ? await cmd(['GET', ACT]) : mem.act;
+    return r ? JSON.parse(r) : null;
+  } catch { return null; }
 }
 async function beats() {
   if (!live) return { a: mem.hb.a || null, b: mem.hb.b || null };
@@ -224,7 +299,7 @@ async function beats() {
   return { a: parse(r && r[0]), b: parse(r && r[1]) };
 }
 async function clearBeats() {
-  mem.hb = {};
+  mem.hb = {}; lastBeat = {};
   if (!live) return;
   await cmd(['DEL', HB('a'), HB('b')]);
 }
@@ -232,5 +307,6 @@ async function clearBeats() {
 module.exports = {
   live, IVS, DEF_IV, MAX_HUNTS, MAX_CONTACTS, newId, newHunt, isoToday,
   loadGlobal, saveGlobal, loadUser, loadOrCreate, loadUsers, saveUser, dropUser,
+  markDirty, dirtyFor, setAct, getAct, used, budget, overBudget, fold,
   log, setBeat, beats, clearBeats
 };

@@ -15,6 +15,9 @@ const WORK_MS = 44000;
 const WATCH_MS = 10000;
 const TAKEOVER = 30000;
 const FLOOR_MS = 20000;
+const G_FRESH = 20000;      // глобальное состояние можно брать из памяти до 20 с
+const U_FRESH = 8000;       // профили — до 8 с (стоп из панели подхватывается быстро)
+const SAVE_MS = 10000;      // обычные изменения пишем не чаще раза в 10 с
 
 const authOk = req => {
   const q = req.query || {};
@@ -24,30 +27,53 @@ const authOk = req => {
 
 // Один проход по всем пользователям. Возвращает {any, pace, results}
 async function sweepAll() {
-  const g = await store.loadGlobal();
-  if (g.botOn === false) return { any: false, pace: 60000, off: true };
+  const g = await store.loadGlobal(G_FRESH);
+  if (g.botOn === false) { await store.setAct({ h: 0, b: 0 }); return { any: false, pace: 60000, off: true }; }
   const rows = (g.users || []).filter(x => !x.blocked);
-  const users = await store.loadUsers(rows);
-  let any = false, pace = 60000;
+  const users = await store.loadUsers(rows, U_FRESH);
+
+  // Защита от аварии с лимитом базы: дошли до бюджета — ставим охоты на паузу и предупреждаем,
+  // а не ждём, пока Upstash начнёт отказывать во всём сразу.
+  if (store.overBudget(g)) {
+    for (const u of users) {
+      if (!u.hunts.some(h => h.active)) continue;
+      svc.bind(g, u);
+      for (const h of u.hunts) h.active = false;
+      store.log(u, 'Охоты остановлены: израсходован месячный бюджет обращений к базе', 1);
+      await store.saveUser(u);
+      await hunt.sendTo(u, '⚠️ <b>Остановил охоты</b>\nМесячный бюджет обращений к базе исчерпан — иначе бот ляжет целиком.\nОбновится 1-го числа. Можно поднять потолок переменной CMD_BUDGET или перевести базу на платный тариф.').catch(() => {});
+    }
+    await store.setAct({ h: 0, b: 0 });
+    await store.saveGlobal(g);
+    return { any: false, pace: 60000, off: true, budget: true };
+  }
+  let any = false, pace = 60000, hAct = 0, bAct = 0;
   const results = [];
   for (const u of users) {
     svc.bind(g, u);
-    let dirty = false;
+    let changed = false, important = false;
     for (const h of u.hunts) {
       if (!h.active) continue;
-      if (await hunt.autoStop(u, h)) { dirty = true; continue; }
+      if (await hunt.autoStop(u, h)) { changed = true; important = true; continue; }
       let r;
       try { r = await hunt.sweep(u, h); }
       catch (e) { h.stats.errors++; store.log(u, 'Сбой прохода: ' + e.message, 1); r = { error: e.message }; }
       await hunt.noteResult(u, h, r);
       results.push({ uid: u.uid, hunt: h.id, ...r });
-      any = true; dirty = true;
+      any = true; changed = true;
+      if (r && (r.booked || r.found || r.offered || r.error)) important = true;   // события пишем сразу
       pace = Math.min(pace, hunt.pace(u, h));
     }
-    try { await hunt.reminders(u); } catch (e) {}
-    u.lastTick = Date.now();
-    if (dirty || (u.hunts || []).some(h => (h.bookings || []).length)) { await store.saveUser(u); dirty = false; }
+    try { if (await hunt.reminders(u)) { changed = true; important = true; } } catch (e) {}
+    hAct += u.hunts.filter(h => h.active).length;
+    bAct += hunt.allActiveBookings(u).length;
+    if (changed) store.markDirty(u.uid);
+    if (important || store.dirtyFor(u.uid) > SAVE_MS) {
+      u.lastTick = Date.now();
+      await store.saveUser(u);
+    }
   }
+  await store.setAct({ h: hAct, b: bAct });
   return { any, pace: Math.max(2000, pace), results };
 }
 
@@ -59,7 +85,7 @@ async function link(req, res, strand, run, delaySec) {
   const first = strand === 'a' ? await sweepAll() : { any: await anyActive(), pace: 10000 };
   if (!first.any) { await chain.drop(); return res.status(200).json({ ok: true, strand, idle: true }); }
   if (!chain.alive(before, strand)) {
-    const g = await store.loadGlobal();
+    const g = await store.loadGlobal(G_FRESH);
     store.log(g, `Фоновый поиск запущен (ветка ${strand.toUpperCase()})`);
     await store.saveGlobal(g);
   }
@@ -67,8 +93,9 @@ async function link(req, res, strand, run, delaySec) {
 
   const until = Date.now() + WORK_MS;
   let sweeps = 0, stop = '', respawn = 0, pace = first.pace;
+  let b = {}, seen = 0;
   while (Date.now() < until) {
-    const b = await chain.beats().catch(() => ({}));
+    if (Date.now() - seen > 9000) { b = await chain.beats().catch(() => ({})); seen = Date.now(); }
     if (b[strand] && b[strand].run && b[strand].run !== run) { stop = 'taken'; break; }
     await chain.beat(strand, run);
 
@@ -104,32 +131,34 @@ async function link(req, res, strand, run, delaySec) {
 }
 
 async function anyActive() {
-  const g = await store.loadGlobal();
+  const a = await store.getAct();
+  if (a && !a.h) return false;                       // одна короткая команда вместо чтения всего состояния
+  const g = await store.loadGlobal(G_FRESH);
   if (g.botOn === false) return false;
-  const users = await store.loadUsers((g.users || []).filter(x => !x.blocked));
-  return users.some(u => (u.hunts || []).some(h => h.active));
-}
-
-async function lastTickAge() {
-  const g = await store.loadGlobal();
-  const users = await store.loadUsers((g.users || []).filter(x => !x.blocked));
-  const t = Math.max(0, ...users.map(u => u.lastTick || 0));
-  return t ? Date.now() - t : Infinity;
+  const users = await store.loadUsers((g.users || []).filter(x => !x.blocked), U_FRESH);
+  const h = users.reduce((n, u) => n + u.hunts.filter(x => x.active).length, 0);
+  const b = users.reduce((n, u) => n + hunt.allActiveBookings(u).length, 0);
+  await store.setAct({ h, b });
+  return h > 0;
 }
 
 // ---------- пингер ----------
 async function guard(req, res) {
+  const a = await store.getAct();
+  // Ни охот, ни броней — выходим сразу. В простое время это 1 команда в минуту.
+  if (a && !a.h && !a.b) return res.status(200).json({ ok: true, active: false, idle: true });
   if (!(await anyActive())) {
     await chain.drop();
-    const g = await store.loadGlobal();
-    const users = await store.loadUsers((g.users || []).filter(x => !x.blocked));
+    const g = await store.loadGlobal(G_FRESH);
+    const users = await store.loadUsers((g.users || []).filter(x => !x.blocked), U_FRESH);
     for (const u of users) { svc.bind(g, u); try { await hunt.reminders(u); await store.saveUser(u); } catch (e) {} }
     return res.status(200).json({ ok: true, active: false });
   }
   const b = await chain.beats().catch(() => ({}));
   const wasAlive = chain.aliveList(b);
+  const age = Math.max(chain.at(b, 'a'), chain.at(b, 'b'));
   let swept = false;
-  if ((await lastTickAge()) > FLOOR_MS) { await sweepAll(); swept = true; }
+  if (!age || Date.now() - age > FLOOR_MS) { await sweepAll(); swept = true; }
   const started = await chain.revive(req, { confirm: true });
   return res.status(200).json({ ok: true, at: L.fmt(Date.now()), alive: wasAlive, started, swept });
 }
