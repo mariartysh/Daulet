@@ -8,6 +8,26 @@ const chain = require('./chain');
 const L = require('./logic');
 
 const ADMIN_U = (process.env.ADMIN_USERNAME || 'gaucho_bro').toLowerCase().replace('@', '');
+const ADMIN_UID = Number(process.env.ADMIN_UID || 0);
+
+// Владелец узнаётся по нику или по числовому id — ДО всякого пароля.
+// Это страховка от «пароль в базе не тот, что я помню, и сменить некому».
+const isOwnerFrom = from => {
+  const uid = Number((from && from.id) || 0);
+  const un = String((from && from.username) || '').toLowerCase().replace('@', '');
+  return (!!ADMIN_UID && uid === ADMIN_UID) || (!!un && un === ADMIN_U);
+};
+
+// Пароль сравниваем без крайних пробелов (их легко прихватить при копировании).
+// Кроме пароля из базы всегда принимается APP_PASSWORD из переменных Vercel —
+// мастер-ключ: поменяли переменную, сделали Redeploy — вход снова работает.
+function checkPassword(g, pw) {
+  const p = String(pw == null ? '' : pw).trim();
+  if (!p) return false;
+  const stored = String((g && g.password) || '').trim();
+  const master = String(process.env.APP_PASSWORD || '').trim();
+  return (!!stored && p === stored) || (!!master && p === master);
+}
 
 // ---------- тарифы (задел под подписку) ----------
 // Пока все лимиты одинаковые: ничего не ограничено. Чтобы включить платный режим,
@@ -35,10 +55,17 @@ async function ctx(uid) {
 function bind(g, u) {
   const a = (g.users || []).find(x => x.uid === g.adminUid);
   u.adminChat = a ? a.chat : 0;
-  u.isAdmin = isAdmin(g, u.uid);
+  u.isAdmin = isAdmin(g, u.uid, u.u);
   return u;
 }
-const isAdmin = (g, uid) => !!uid && (Number(g.adminUid) === Number(uid));
+// Владелец — это либо записанный в базе adminUid, либо совпадение с ADMIN_UID/ADMIN_USERNAME.
+// Права владельца не зависят от содержимого базы: сменить пароль он может всегда.
+const isAdmin = (g, uid, uname) => {
+  const id = Number(uid || 0);
+  if (!id) return false;
+  if (Number(g && g.adminUid) === id) return true;
+  return isOwnerFrom({ id, username: uname });
+};
 const userRow = (g, uid) => (g.users || []).find(x => Number(x.uid) === Number(uid));
 
 // Регистрация пользователя после верного пароля
@@ -53,7 +80,7 @@ async function linkUser(g, from, chat) {
   row.name = from.first_name || row.name;
   row.u = from.username || row.u;
   row.blocked = false;
-  const byName = (from.username || '').toLowerCase() === ADMIN_U;
+  const byName = isOwnerFrom(from);
   if (!g.adminUid || byName) g.adminUid = byName ? uid : (g.adminUid || uid);
   const u = await store.loadOrCreate(uid, chat);
   u.chat = Number(chat); u.name = row.name; u.u = row.u;
@@ -262,7 +289,8 @@ function checkInitData(initData) {
 }
 
 module.exports = {
-  ADMIN_U, PLANS, planOf, limits, ctx, bind, isAdmin, userRow, linkUser, touch, normPhone,
+  ADMIN_U, ADMIN_UID, isOwnerFrom, checkPassword,
+  PLANS, planOf, limits, ctx, bind, isAdmin, userRow, linkUser, touch, normPhone,
   findHunt, addHunt, removeHunt, patchHunt, sanitize, startHunt, stopHunt,
   anyoneHunting, kick, setContact, delContact, setContacts,
   mkToken, readToken, checkInitData

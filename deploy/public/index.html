@@ -139,6 +139,9 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
     <div class="sub" id="perDay" style="font-weight:600"></div>
     <div class="progress"><i id="pbar" style="width:0%"></i></div>
     <button class="cta" id="toggleBtn" onclick="toggleHunt()">Начать охоту</button>
+    <div id="delHuntWrap" style="display:none">
+      <button class="btn danger" style="width:100%" onclick="removeHunt()">Удалить эту охоту</button>
+    </div>
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap" class="sub">
       <span id="stLine" style="line-height:1.6"></span>
       <span id="tgLine"></span>
@@ -187,9 +190,6 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
       <label>Как часто проверять</label>
       <div class="chips g5" id="interval"></div>
       <div class="sub" style="margin-top:8px">Чем чаще — тем выше шанс опередить чужих ботов. Если сайт начнёт ограничивать (429), сам сбавлю темп и вернусь, когда отпустит.</div>
-    </div>
-    <div id="delHuntWrap" style="display:none">
-      <button class="btn danger" onclick="removeHunt()">Удалить эту охоту</button>
     </div>
   </div>
 
@@ -398,8 +398,8 @@ function render(){
   $('timeFrom').innerHTML=of;$('timeTo').innerHTML=ot;
 
   const win=parseInt(h.timeTo)-parseInt(h.timeFrom);
-  $('winWarn').style.display=win<=3?'block':'none';
-  if(win<=3)$('winWarn').textContent='Окно всего '+win+' ч — это минимум. Чем шире окно, тем больше шансов: свободных слотов в узком коридоре может не быть вовсе.';
+  $('winWarn').style.display=win<=2?'block':'none';
+  if(win<=2)$('winWarn').textContent='Окно всего '+win+' ч. Чем шире окно, тем больше шансов: свободных слотов в узком коридоре может не быть вовсе.';
   $('fitHint').textContent=(parseInt(h.timeTo)>23?'🌙 ночь включена · ':'')+'ищу старт с '+HS(parseInt(h.timeFrom))+' до '+HS(parseInt(h.timeTo));
   const nd=h.days.length;
   $('daysHint').textContent=nd>1
@@ -472,6 +472,9 @@ function render(){
 }
 
 function renderContacts(){
+  // Если курсор внутри поля — не трогаем разметку: перерисовка сбивает ввод.
+  const a=document.activeElement;
+  if(a&&a.tagName==='INPUT'&&a.closest('#contacts'))return;
   const list=(S.contacts||[]).length?S.contacts:[{name:'',phone:'',email:''}];
   $('contacts').innerHTML=list.map((c,i)=>'<div class="ct">'
     +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">'
@@ -483,20 +486,48 @@ function renderContacts(){
     +'</div>').join('');
   $('contacts').querySelectorAll('input').forEach(el=>{
     if(el.dataset.f==='phone')mask(el);
-    el.oninput=()=>{ if(el.dataset.f==='phone')mask(el); DIRTY=true; $('saveC').classList.add('hot'); $('saveC').textContent='Применить'; };
+    el.oninput=ev=>{ if(el.dataset.f==='phone')mask(el,ev); DIRTY=true; $('saveC').classList.add('hot'); $('saveC').textContent='Применить'; };
   });
 }
-function mask(el){
-  let d=el.value.replace(/\D/g,'');
-  if(d.length>10&&(d[0]==='7'||d[0]==='8'))d=d.slice(1);
-  d=d.slice(0,10);
-  if(!d){el.value='';return;}
+// Маска номера. Главное — не терять курсор: считаем, сколько цифр стояло слева от него,
+// переформатируем строку и ставим курсор после той же по счёту цифры.
+function phFmt(d){
+  if(!d)return '';
   let out='+7';
   if(d.length)out+=' '+d.slice(0,3);
   if(d.length>3)out+=' '+d.slice(3,6);
   if(d.length>6)out+=' '+d.slice(6,8);
   if(d.length>8)out+=' '+d.slice(8,10);
-  el.value=out;
+  return out;
+}
+function mask(el,ev){
+  const raw=el.value;
+  const focused=document.activeElement===el;
+  let pos=focused&&el.selectionStart!=null?el.selectionStart:raw.length;
+  const all=raw.match(/\d/g)||[];
+  // «+7» в начале — это префикс маски, а не набранная цифра. Без плюса убираем
+  // только явную «восьмёрку» или лишнюю семёрку длинного номера.
+  const plus=raw.trim().charAt(0)==='+';
+  const stripped=all.length>0&&(plus||all[0]==='8'||(all.length>10&&all[0]==='7'));
+  let d=all.join('');
+  if(stripped)d=d.slice(1);
+  d=d.slice(0,10);
+  let n=(raw.slice(0,pos).match(/\d/g)||[]).length;
+  if(stripped&&n>0)n--;
+  n=Math.min(n,d.length);
+  // Backspace съел только пробел или «+» — значит удаляем цифру слева от курсора
+  if(ev&&ev.inputType==='deleteContentBackward'&&d===el.dataset.pd&&n>0){d=d.slice(0,n-1)+d.slice(n);n--;}
+  // Delete вперёд по разделителю — убираем цифру справа
+  if(ev&&ev.inputType==='deleteContentForward'&&d===el.dataset.pd&&n<d.length)d=d.slice(0,n)+d.slice(n+1);
+  el.dataset.pd=d;
+  const out=phFmt(d);
+  if(el.value!==out)el.value=out;
+  if(!focused)return;
+  let p=Math.min(3,out.length),seen=0;
+  if(n>0)for(let i=0;i<out.length;i++){
+    if(out[i]>='0'&&out[i]<='9'){seen++;if(seen>=n+1){p=i+1;break;}p=i+1;}
+  }
+  try{el.setSelectionRange(p,p);}catch(e){}
 }
 function collectContacts(){
   const out=[];

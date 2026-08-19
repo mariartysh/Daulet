@@ -14,7 +14,7 @@ const fmt = ms => `${dm(ms)} (${wd(ms)}) ${hm(ms)}`;
 
 const MAX_H = 25;                                          // до 01:00 ночи — дальше корты закрыты
 const MIN_H = 6;
-const MIN_WINDOW = 3;                                      // окно старта не короче 3 часов
+const MIN_WINDOW = 1;                                      // окно старта не короче часа (можно ловить ровно один час)
 const hourVal = h => `${p(h)}:00`;
 const hourLabel = h => h === 24 ? '00:00 · полночь' : h === 25 ? '01:00 · ночью' : hourVal(h);
 const parseHM = s => { const [h, m] = String(s).split(':').map(Number); return h * 60 + (m || 0); };
@@ -54,7 +54,7 @@ const normTime = s => {
   return m ? `${p(Number(m[1]))}:${m[2]}` : null;
 };
 
-// Окно старта: не короче MIN_WINDOW часов, в границах 06:00–01:00.
+// Окно старта: не короче MIN_WINDOW часа, в границах 06:00–01:00.
 function fitWindow(h) {
   let f = Math.max(MIN_H, Math.min(24, parseInt(h.timeFrom || '18:00') || 18));
   let to = Math.max(f + 1, Math.min(MAX_H, parseInt(h.timeTo || '23:00') || 23));

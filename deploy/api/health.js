@@ -16,6 +16,9 @@ module.exports = async (req, res) => {
       TELEGRAM_TOKEN: !!process.env.TELEGRAM_TOKEN,
       ALTEGIO_AUTH: !!process.env.ALTEGIO_AUTH,
       TICK_KEY: !!process.env.TICK_KEY,
+      APP_PASSWORD: process.env.APP_PASSWORD ? 'задан — им всегда можно войти' : 'НЕ ЗАДАН',
+      ADMIN_USERNAME: (process.env.ADMIN_USERNAME || 'gaucho_bro (по умолчанию)'),
+      ADMIN_UID: Number(process.env.ADMIN_UID || 0) || 'не задан',
       APP_URL: (process.env.APP_URL || '').trim() || 'НЕ ЗАДАН'
     },
     база: store.live ? 'настроена' : 'НЕТ — данные живут в памяти и стираются при каждом запуске (отсюда «слетел пароль»)'
@@ -41,8 +44,25 @@ module.exports = async (req, res) => {
       схема: g.v, пользователей: (g.users || []).length, владелец_uid: g.adminUid,
       бот_включён: g.botOn !== false,
       пароль_задан: !!g.password,
-      пароль_по_умолчанию: g.password === 'admin' ? 'ДА — состояние сброшено' : 'нет'
+      пароль_по_умолчанию: g.password === 'admin' ? 'ДА — состояние сброшено' : 'нет',
+      длина_пароля_в_базе: String(g.password || '').length,
+      пароль_в_базе_совпадает_с_APP_PASSWORD:
+        !process.env.APP_PASSWORD ? 'APP_PASSWORD не задан'
+        : (String(g.password || '').trim() === String(process.env.APP_PASSWORD).trim() ? 'да' : 'НЕТ — в базе другой пароль, но APP_PASSWORD всё равно подойдёт')
     };
+
+    // Аварийная смена пароля: /api/health?key=TICK_KEY&setpass=НовыйПароль
+    const sp = String((req.query || {}).setpass || '');
+    if (full && sp) {
+      if (sp.length < 6) out.смена_пароля = 'от 6 символов';
+      else {
+        g.password = sp;
+        store.log(g, 'Пароль сменён аварийно через /api/health');
+        await store.saveGlobal(g);
+        out.смена_пароля = 'готово — новый пароль установлен';
+        out.данные.длина_пароля_в_базе = sp.length;
+      }
+    }
     out.команды_к_базе = {
       за_этот_месяц_оценка: store.used(g),
       бюджет_автостопа: store.budget(),
@@ -68,7 +88,7 @@ module.exports = async (req, res) => {
       };
     } catch (e) { out.вебхук = 'не проверить: ' + e.message; }
   } else if (!full) {
-    out.подсказка = 'Добавьте ?key=ВАШ_TICK_KEY — покажу состояние вебхука Telegram и последнюю ошибку доставки.';
+    out.подсказка = 'Добавьте ?key=ВАШ_TICK_KEY — покажу состояние вебхука Telegram. Сменить пароль: ?key=ВАШ_TICK_KEY&setpass=НовыйПароль';
   }
 
   return res.status(200).json(out);

@@ -24,6 +24,7 @@ const TOASTER = {
 
 const COMMANDS = [
   { command: 'menu', description: '🎾 Меню — все охоты' },
+  { command: 'whoami', description: '🪪 Мой id и права' },
   { command: 'status', description: '📊 Что происходит сейчас' },
   { command: 'bookings', description: '📋 Мои брони и отмена' },
   { command: 'stop', description: '⏹ Остановить все охоты' },
@@ -238,10 +239,30 @@ async function onMessage(g, m, req) {
   const arg = rest.join(' ');
   let row = svc.userRow(g, uid);
 
-  // ---- не подключён: только пароль ----
+  // ---- не подключён: пароль, либо владелец, либо аварийный ключ ----
   if (!row) {
     const pw = cmd === '/start' ? arg : text;
-    if (pw && pw === g.password) {
+    // Кто я для бота — видно всегда, даже до входа. Пригодится, чтобы сверить ADMIN_USERNAME.
+    if (cmd === '/whoami') {
+      return tg.send(chat,
+        `🪪 <b>Ваш id:</b> <code>${uid}</code>\n<b>Ник:</b> ${from.username ? '@' + from.username : '—'}\n` +
+        `Владелец по переменным: ${svc.isOwnerFrom(from) ? '✅ да' : '❌ нет'}\n\n` +
+        `Если «нет» — задайте в Vercel <code>ADMIN_UID=${uid}</code> и сделайте Redeploy.`);
+    }
+    // Аварийный вход по TICK_KEY: /unlock ВАШ_TICK_KEY — делает вас владельцем.
+    if (cmd === '/unlock') {
+      const k = String(process.env.TICK_KEY || '');
+      if (!k || arg.trim() !== k) return tg.send(chat, '⛔️ Ключ не подошёл.');
+      g.adminUid = uid;
+      const { u: au } = await svc.linkUser(g, from, chat);
+      store.log(g, 'Аварийный вход владельца по TICK_KEY');
+      await store.saveGlobal(g);
+      const v = vMain(au, g);
+      await tg.send(chat, `🔓 <b>Готово — вы владелец.</b>\nТекущий пароль: <code>${g.password}</code>\nСменить: <code>/key НовыйПароль</code>`);
+      return tg.send(chat, v.text, { reply_markup: v.reply_markup });
+    }
+    const owner = svc.isOwnerFrom(from);
+    if (owner || (pw && svc.checkPassword(g, pw))) {
       const { u } = await svc.linkUser(g, from, chat);
       store.log(g, `Подключился: ${from.first_name || uid}${from.username ? ' @' + from.username : ''}`);
       await store.saveGlobal(g);
@@ -250,7 +271,8 @@ async function onMessage(g, m, req) {
       await tg.send(chat, '⌨️ Кнопки внизу — вместо команд.', { reply_markup: TOASTER });
       const p = panelBtn(u);
       await tg.send(chat,
-        `🤝 <b>Пароль принят — вы в деле!</b>\n\n` +
+        (owner ? `👑 <b>С возвращением, владелец.</b>\nВас я узнаю по нику/id, пароль у вас не спрашиваю.\nТекущий пароль: <code>${g.password}</code> · сменить: <code>/key НовыйПароль</code>\n\n`
+               : `🤝 <b>Пароль принят — вы в деле!</b>\n\n`) +
         `У вас свой профиль: свои контакты, свои охоты, свои брони. Другие пользователи их не видят.\n\n` +
         `1️⃣ «Контакты» — имя и телефон\n2️⃣ «Охота» — дни и время\n3️⃣ «Запустить» — дальше я сам\n\n` +
         (p ? `Кнопка «📱 Открыть панель» — то же самое экраном.` : ''),
@@ -258,7 +280,7 @@ async function onMessage(g, m, req) {
       const v = vMain(u, g);
       return tg.send(chat, v.text, { reply_markup: v.reply_markup });
     }
-    if (cmd.startsWith('/')) return tg.send(chat, '🔒 <b>Сначала пароль</b>\nЭто закрытый бот. Пришлите пароль одним сообщением — и открою доступ.');
+    if (cmd.startsWith('/')) return tg.send(chat, '🔒 <b>Сначала пароль</b>\nЭто закрытый бот. Пришлите пароль одним сообщением — и открою доступ.\n\nВы владелец и пароль не подходит? Пришлите <code>/whoami</code>.');
     return tg.send(chat, `🎾 <b>Court Hunter</b>\n\nЛовлю свободные корты в Daulet Tennis (Кордай, 6) и бронирую их на вас, пока не увели.\n\n🔒 Доступ по паролю — пришлите его одним сообщением.`);
   }
 
@@ -270,6 +292,10 @@ async function onMessage(g, m, req) {
   if (g.botOn === false && !u.isAdmin) { await store.saveGlobal(g); return tg.send(chat, '🔴 Бот сейчас выключен владельцем. Загляните позже.'); }
 
   const done = async r => { await store.saveGlobal(g); await store.saveUser(u); return r; };
+
+  if (cmd === '/whoami') {
+    return done(tg.send(chat, `🪪 id: <code>${uid}</code> · ${from.username ? '@' + from.username : 'без ника'} · ${u.isAdmin ? '👑 владелец' : 'пользователь'}`));
+  }
 
   if (cmd === '/key') {
     if (!u.isAdmin) return done(tg.send(chat, '⛔️ Такой команды нет.'));

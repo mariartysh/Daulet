@@ -64,12 +64,12 @@ module.exports = async (req, res) => {
 
     if (uid && !row) {                                   // первый вход из Telegram — нужен пароль
       if (!body.password) return res.status(200).json({ ok: false, need: 'password', error: 'Пришлите пароль — доступ закрытый' });
-      if (body.password !== g.password) return res.status(200).json({ ok: false, need: 'password', error: 'Пароль не подошёл' });
+      if (!svc.checkPassword(g, body.password)) return res.status(200).json({ ok: false, need: 'password', error: 'Пароль не подошёл' });
       const r = await svc.linkUser(g, from || { id: uid }, (from && from.id) || uid);
       row = r.row;
     }
     if (!uid) {                                          // браузер без Telegram: только владелец по паролю
-      if (body.password && body.password === g.password && g.adminUid) uid = g.adminUid;
+      if (svc.checkPassword(g, body.password) && g.adminUid) uid = g.adminUid;
       else return res.status(200).json({ ok: false, need: 'password', error: g.adminUid ? 'Откройте панель кнопкой в боте — так я узнаю, кто вы' : 'Сначала подключитесь в Telegram-боте' });
       row = svc.userRow(g, uid);
     }
