@@ -324,7 +324,7 @@ function log(target, m, warn) {
 async function setBeat(k, run, ttlSec) {
   if (!live) { mem.hb[k] = { at: Date.now(), run }; return; }
   const key = k + ':' + run;
-  if (lastBeat[key] && Date.now() - lastBeat[key] < 12000) return;   // ветка считается живой 45 с — чаще отмечаться незачем
+  if (lastBeat[key] && Date.now() - lastBeat[key] < 20000) return;   // ветка считается живой 45 с — чаще отмечаться незачем
   lastBeat[key] = Date.now();
   await cmd(['SET', HB(k), JSON.stringify({ at: Date.now(), run }), 'EX', String(ttlSec || 120)]);
 }

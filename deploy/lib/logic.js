@@ -12,11 +12,11 @@ const dm = ms => { const d = local(ms); return `${p(d.getUTCDate())}.${p(d.getUT
 const wd = ms => WD[local(ms).getUTCDay()];
 const fmt = ms => `${dm(ms)} (${wd(ms)}) ${hm(ms)}`;
 
-const MAX_H = 25;                                          // до 01:00 ночи — дальше корты закрыты
+const MAX_H = 26;                                          // до 02:00 ночи — дальше корты закрыты
 const MIN_H = 6;
-const MIN_WINDOW = 1;                                      // окно старта не короче часа (можно ловить ровно один час)
+const MIN_WINDOW = 1;                                      // «до» — конец игры: 18:00–19:00 = ровно один час, старт только в 18:00
 const hourVal = h => `${p(h)}:00`;
-const hourLabel = h => h === 24 ? '00:00 · полночь' : h === 25 ? '01:00 · ночью' : hourVal(h);
+const hourLabel = h => h === 24 ? '00:00 · полночь' : h === 25 ? '01:00 · ночью' : h === 26 ? '02:00 · ночью' : hourVal(h);
 const parseHM = s => { const [h, m] = String(s).split(':').map(Number); return h * 60 + (m || 0); };
 
 // Начало локальных суток даты ISO (мс UTC)
@@ -54,10 +54,11 @@ const normTime = s => {
   return m ? `${p(Number(m[1]))}:${m[2]}` : null;
 };
 
-// Окно старта: не короче MIN_WINDOW часа, в границах 06:00–01:00.
+// Окно игры: «с» — самый ранний старт, «до» — когда игра заканчивается.
+// 18:00–19:00 = один час, единственный старт 18:00. Границы 06:00–02:00.
 function fitWindow(h) {
-  let f = Math.max(MIN_H, Math.min(24, parseInt(h.timeFrom || '18:00') || 18));
-  let to = Math.max(f + 1, Math.min(MAX_H, parseInt(h.timeTo || '23:00') || 23));
+  let f = Math.max(MIN_H, Math.min(MAX_H - MIN_WINDOW, parseInt(h.timeFrom || '18:00') || 18));
+  let to = Math.max(f + MIN_WINDOW, Math.min(MAX_H, parseInt(h.timeTo || '23:00') || 23));
   if (to - f < MIN_WINDOW) {
     to = Math.min(MAX_H, f + MIN_WINDOW);
     if (to - f < MIN_WINDOW) f = Math.max(MIN_H, to - MIN_WINDOW);
@@ -67,8 +68,8 @@ function fitWindow(h) {
   return h;
 }
 
-// Момент, когда окно этого дня окончательно закрылось
-const dayEndsAt = (h, iso) => dayStartISO(iso) + parseHM(h.timeTo || '23:00') * 60e3;
+// Момент, когда окно этого дня окончательно закрылось (последний возможный старт)
+const dayEndsAt = (h, iso) => dayStartISO(iso) + (parseHM(h.timeTo || '23:00') - 60) * 60e3;
 
 // Убрать прошедшие дни. Возвращает число выпавших.
 function rollDays(h, nowMs) {
@@ -96,7 +97,8 @@ function taskDates(h, nowMs) {
 function slotMatches(h, dateEntry, startMs, nowMs) {
   if (startMs < (nowMs || Date.now()) + 6 * 60e3) return false;   // впритык не берём
   const mins = parseHM(hm(startMs)) + (dateEntry.carry ? 1440 : 0);
-  return mins >= parseHM(h.timeFrom || '18:00') && mins <= parseHM(h.timeTo || '23:00');
+  // час игры должен целиком попасть в окно: «до 19:00» = последний старт 18:00
+  return mins >= parseHM(h.timeFrom || '18:00') && mins + 60 <= parseHM(h.timeTo || '23:00');
 }
 
 // К какому дню плана относится слот: ночные 00:00/01:00 — это вечер предыдущего дня

@@ -17,7 +17,7 @@ const TAKEOVER = 30000;
 const FLOOR_MS = 20000;
 const G_FRESH = 20000;      // глобальное состояние можно брать из памяти до 20 с
 const U_FRESH = 8000;       // профили — до 8 с (стоп из панели подхватывается быстро)
-const SAVE_MS = 10000;      // обычные изменения пишем не чаще раза в 10 с
+const SAVE_MS = 20000;      // обычные изменения пишем не чаще раза в 20 с
 
 const authOk = req => {
   const q = req.query || {};
@@ -82,7 +82,7 @@ async function link(req, res, strand, run, delaySec) {
   const before = await chain.beats().catch(() => ({}));
   await chain.beat(strand, run);
   // Ветка A работает, B только страхует — лишних запросов к сайту не делаем.
-  const first = strand === 'a' ? await sweepAll() : { any: await anyActive(), pace: 10000 };
+  const first = strand === 'a' ? await sweepAll() : { any: await anyActive(true), pace: 10000 };
   if (!first.any) { await chain.drop(); return res.status(200).json({ ok: true, strand, idle: true }); }
   if (!chain.alive(before, strand)) {
     const g = await store.loadGlobal(G_FRESH);
@@ -119,7 +119,7 @@ async function link(req, res, strand, run, delaySec) {
   let handed = false, neighbour = false;
   if (stop === 'done') await chain.drop();
   else if (stop !== 'taken') {
-    const still = await anyActive();
+    const still = await anyActive(true);
     if (still) {
       handed = await chain.spawn(req, strand, { confirm: true });
       const other = strand === 'a' ? 'b' : 'a';
@@ -130,9 +130,10 @@ async function link(req, res, strand, run, delaySec) {
   return res.status(200).json({ ok: true, at: L.fmt(Date.now()), strand, run, sweeps, pace, stop: stop || 'budget', handed, neighbour });
 }
 
-async function anyActive() {
+async function anyActive(cheap) {
   const a = await store.getAct();
   if (a && !a.h) return false;                       // одна короткая команда вместо чтения всего состояния
+  if (cheap && a && a.h) return true;                // ключ уже говорит «охоты идут» — пересчитывать незачем
   const g = await store.loadGlobal(G_FRESH);
   if (g.botOn === false) return false;
   const users = await store.loadUsers((g.users || []).filter(x => !x.blocked), U_FRESH);

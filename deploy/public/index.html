@@ -181,6 +181,7 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
     <div>
       <label>Тип корта</label>
       <div class="chips g3" id="type"></div>
+      <div id="typeWarn" class="warn" style="display:none;margin-top:8px"></div>
     </div>
     <div>
       <label>Номер корта</label>
@@ -203,11 +204,8 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
     <div class="sub" id="applyHint"></div>
   </div>
 
-  <div class="card">
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
-      <h2>На кого бронируем</h2>
-      <span class="pill" id="cCount"></span>
-    </div>
+  <button class="fold" id="cFold" onclick="toggleFold('cBox','cFold')"><span>👥</span><span>На кого бронируем</span><span class="pill" id="cCount"></span><span class="car">▾</span></button>
+  <div class="card" id="cBox" style="display:none">
     <div class="sub">Первый контакт — основной. Остальные нужны, когда на одно и то же время берём больше одного корта: несколько кортов на одно имя администрация отменяет.</div>
     <div id="contacts" style="display:flex;flex-direction:column;gap:10px"></div>
     <div class="row">
@@ -250,7 +248,7 @@ const TGA=window.Telegram&&Telegram.WebApp?Telegram.WebApp:null;
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const WDN=['вс','пн','вт','ср','чт','пт','сб'];
 const TZ=5;
-let TOKEN='',THEME='auto',S=null,HID='',DIRTY=false,saveTimer=null;
+let TOKEN='',THEME='auto',S=null,HID='',DIRTY=false,saveTimer=null,CFOLD=false;
 
 // ---------- локально храним только тему и токен ----------
 const stg={
@@ -375,8 +373,8 @@ function dayLabel(off){
   return ['Сегодня','Завтра','Послезавтра'][off]+' · '+WDN[d.getUTCDay()]+' '+String(d.getUTCDate()).padStart(2,'0')+'.'+String(d.getUTCMonth()+1).padStart(2,'0');
 }
 const HV=n=>String(n).padStart(2,'0')+':00';
-const HL=n=>n===24?'00:00 · полночь':n===25?'01:00 · ночью':HV(n);
-const HS=n=>n===24?'00:00':n===25?'01:00 ночи':HV(n);
+const HL=n=>n===24?'00:00 · полночь':n===25?'01:00 · ночью':n===26?'02:00 · ночью':HV(n);
+const HS=n=>n===24?'00:00':n===25?'01:00 ночи':n===26?'02:00 ночи':HV(n);
 const isoWord=iso=>{const off=Math.round((Date.parse(iso+'T00:00:00Z')-Date.parse(isoOf(0)+'T00:00:00Z'))/864e5);
   return ['сегодня','завтра','послезавтра'][off]||iso.slice(8,10)+'.'+iso.slice(5,7)};
 
@@ -419,6 +417,10 @@ function render(){
     edit({days:nx});
   });
   chips($('type'),[['any','Любой'],['indoor','Крытый'],['outdoor','Открытый']],v=>h.type===v,v=>edit({type:v,courts:[]}));
+  // Если выбранного типа на сайте нет — охота будет бегать впустую, говорим об этом сразу.
+  const sn=S.seen,nType=sn?(h.type==='indoor'?sn.in:h.type==='outdoor'?sn.out:sn.in+sn.out):null;
+  $('typeWarn').style.display=nType===0?'block':'none';
+  if(nType===0)$('typeWarn').textContent='Таких кортов на сайте сейчас нет: вижу крытых '+sn.in+', открытых '+sn.out+'. Охота будет искать впустую — выберите другой тип.';
   if(h.type==='any'){$('courtsHint').style.display='';$('courts').innerHTML='';}
   else{
     $('courtsHint').style.display='none';
@@ -451,18 +453,20 @@ function render(){
   chips($('interval'),(S.intervals||[2,3,5,7,10]).map(v=>[v,v+' с']),v=>Number(h.interval)===v,v=>edit({interval:v}));
 
   let of='',ot='';
-  for(let x=6;x<=24;x++)of+='<option value="'+HV(x)+'" '+(HV(x)===h.timeFrom?'selected':'')+'>'+HL(x)+'</option>';
-  for(let x=7;x<=25;x++)ot+='<option value="'+HV(x)+'" '+(HV(x)===h.timeTo?'selected':'')+'>'+HL(x)+'</option>';
+  for(let x=6;x<=25;x++)of+='<option value="'+HV(x)+'" '+(HV(x)===h.timeFrom?'selected':'')+'>'+HL(x)+'</option>';
+  for(let x=7;x<=26;x++)ot+='<option value="'+HV(x)+'" '+(HV(x)===h.timeTo?'selected':'')+'>'+HL(x)+'</option>';
   $('timeFrom').innerHTML=of;$('timeTo').innerHTML=ot;
 
-  const win=parseInt(h.timeTo)-parseInt(h.timeFrom);
-  $('winWarn').style.display=win<=2?'block':'none';
-  if(win<=2)$('winWarn').textContent='Окно всего '+win+' ч. Чем шире окно, тем больше шансов: свободных слотов в узком коридоре может не быть вовсе.';
-  $('fitHint').textContent=(parseInt(h.timeTo)>23?'🌙 ночь включена · ':'')+'ищу старт с '+HS(parseInt(h.timeFrom))+' до '+HS(parseInt(h.timeTo));
+  const win=parseInt(h.timeTo)-parseInt(h.timeFrom),lastStart=parseInt(h.timeTo)-1;
+  $('winWarn').style.display=win===2?'block':'none';
+  if(win===2)$('winWarn').textContent='Окно 2 ч — всего два возможных старта. Чем шире окно, тем больше шансов.';
+  $('fitHint').textContent=(parseInt(h.timeTo)>23?'🌙 ночь включена · ':'')
+    +(win===1?'ровно один час: беру только старт в '+HS(parseInt(h.timeFrom))
+            :'ищу старт с '+HS(parseInt(h.timeFrom))+', последний — '+HS(lastStart)+' (игра до '+HS(parseInt(h.timeTo))+')');
   const nd=h.days.length;
   $('daysHint').textContent=nd>1
     ? 'Цель считается по каждому дню: '+nd+' × '+h.needed+' = '+(nd*h.needed)+' кортов. После полуночи «завтра» само становится «сегодня» — план не сбивается.'
-    : 'Один день · '+h.needed+' '+(h.needed===1?'корт':'кортов')+'. Нужно 2 часа подряд — поставьте 2 корта.';
+    : 'Один день · '+h.needed+' '+(h.needed===1?'корт':'кортов')+'. Нужно 2 часа подряд — поставьте 2 корта и окно на 2 ч.';
   $('delHuntWrap').style.display=S.hunts.length>1?'':'none';
 
   // статус
@@ -546,6 +550,9 @@ function renderContacts(){
     if(el.dataset.f==='phone')mask(el);
     el.oninput=ev=>{ if(el.dataset.f==='phone')mask(el,ev); DIRTY=true; $('saveC').classList.add('hot'); $('saveC').textContent='Применить'; };
   });
+  // Первый вход без готовых контактов — раскрываем шторку сами: без контакта охота не запустится.
+  if(!CFOLD){CFOLD=true;
+    if(!(S.contacts||[]).some(c=>c.name&&c.phone)&&$('cBox').style.display==='none')toggleFold('cBox','cFold');}
 }
 // Маска номера. Главное — не терять курсор: считаем, сколько цифр стояло слева от него,
 // переформатируем строку и ставим курсор после той же по счёту цифры.
@@ -653,9 +660,13 @@ async function resetAll(){
 async function probe(){
   toast('Проверяю связь…');const r=await api('probe');
   if(!r.ok)return toast('Что-то не так с сервером');
-  const p=r.probe;
+  const p=r.probe,bg=p.bg||{};
+  const bgTxt=!bg.tickKey?'❌ не задан TICK_KEY'
+    :(bg.live&&bg.live.length?'✅ '+bg.live.join('+').toUpperCase()+(bg.a!=null?', отметка '+bg.a+' с назад':'')
+                             :'❌ ветки молчат'+(bg.appUrl?' — проверьте пингер':' — не задан APP_URL'));
   toast('Сайт кортов: '+(p.altegio?'✅ кортов '+p.courts+' (под фильтр '+p.matching+')':'❌')
     +' · Telegram: '+(p.tg?(p.chat?'✅':'⚠️ чат не привязан'):'❌')+' · Память: '+(p.kv?'✅':'⚠️ временная')
+    +' · Фоновый поиск: '+bgTxt
     +(p.error?' · '+p.error:''));
 }
 async function takeOffer(id){buzz('success');toast('Бронирую…');const r=await api('takeOffer',{id});buzz(r.ok?'success':'error');toast(r.ok?'Есть! Корт ваш 🎾':(r.error||'Не вышло'));refresh();}

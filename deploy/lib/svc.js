@@ -204,7 +204,10 @@ async function startHunt(u, g, h, req, src) {
   await chain.spawn(req, 'b', { confirm: false, delay: 20 });
   if (!okA) {
     const f = await store.loadUser(u.uid);
-    if (f) { store.log(f, 'Фоновая ветка не поднялась — проверьте APP_URL/TICK_KEY и пингер', 1); await store.saveUser(f); }
+    const why = !process.env.TICK_KEY ? 'не задан TICK_KEY'
+      : !(process.env.APP_URL || '').trim() ? 'не задан APP_URL — самовызов идти некуда'
+      : 'сервер не ответил на самовызов';
+    if (f) { store.log(f, `Фоновая ветка не поднялась (${why}) — жду пингер, откройте /api/health?key=TICK_KEY`, 1); await store.saveUser(f); }
   }
   return { ok: true, bg: okA };
 }

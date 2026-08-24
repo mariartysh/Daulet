@@ -199,7 +199,22 @@ async function sweep(u, h) {
   catch (e) { h.stats.errors++; log(u, 'Сбой: ' + e.message, 1); await notifyError(u, e.message); return { error: e.message }; }
 
   const courts = targets.filter(m => L.courtOk(h, m));
-  if (!courts.length) { log(u, `${label(h)}: под фильтр не подходит ни один корт (всего ${targets.length}) — ослабьте фильтр`, 1); return { error: 'no courts' }; }
+  if (!courts.length) {
+    // Это НЕ сбой сайта: фильтр охоты не совпал с тем, что есть на сайте.
+    // Не трогаем счётчик сбоев (иначе бот врал «сайт не отвечает») и не спамим лог.
+    const inC = targets.filter(x => x.indoor === true).length, outC = targets.filter(x => x.indoor === false).length;
+    const t = h.type === 'indoor' ? 'крытые' : h.type === 'outdoor' ? 'открытые' : 'любой тип';
+    const nums = h.courts && h.courts.length ? ' №' + h.courts.join(', ') : '';
+    const why = `фильтр «${t}${nums}» не совпал ни с одним кортом. На сайте вижу: крытых ${inC}, открытых ${outC}. Смените тип или номер корта.`;
+    if (Date.now() - (h.noFitAt || 0) > 5 * 60e3) {
+      h.noFitAt = Date.now();
+      log(u, `${label(h)}: ${why}`, 1);
+      await notifyError(u, `${label(h)}: ${why}`);
+    }
+    if (u.bo && u.bo.fails) u.bo.fails = 0;   // запросов не было — старые «сбои» не в счёт
+    return { skipped: 'filter', why };
+  }
+  h.noFitAt = 0;
   const dates = L.taskDates(h, now);
 
   // Опрашиваем ТОЛЬКО корты и дни из фильтра — меньше запросов, выше темп.

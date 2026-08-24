@@ -423,7 +423,7 @@ async function onCallback(g, cb, req) {
     const cur = parseInt(op === 'F' ? h.timeFrom : h.timeTo);
     const next = L.hourVal(cur + Number(b2));
     svc.patchHunt(u, h, op === 'F' ? { timeFrom: next } : { timeTo: next });
-    if (parseInt(h.timeTo) - parseInt(h.timeFrom) === L.MIN_WINDOW) toast = `Окно не короче ${L.MIN_WINDOW} ч — иначе ловить нечего`;
+    if (parseInt(h.timeTo) - parseInt(h.timeFrom) === L.MIN_WINDOW) toast = `Ровно один час: ловлю только старт в ${L.hourLabel(parseInt(h.timeFrom))}`;
     target = 'hunt'; targetArg = h.id;
     return fin();
   }

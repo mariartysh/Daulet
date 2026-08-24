@@ -113,6 +113,10 @@ module.exports = async (req, res) => {
           bg: live.length > 0, strands: live,
           lastTick: u.lastTick || 0,
           banLeft: Math.ceil(alt.banLeft() / 1000),
+          seen: u.targets && u.targets.list ? {
+            in: u.targets.list.filter(x => x.indoor === true).length,
+            out: u.targets.list.filter(x => x.indoor === false).length
+          } : null,
           users: (g.users || []).length,
           log: (u.log || []).slice(0, 60)
         });
@@ -189,6 +193,14 @@ module.exports = async (req, res) => {
       }
       case 'probe': {
         const out = { tg: !!process.env.TELEGRAM_TOKEN, chat: !!u.chat, kv: store.live, users: (g.users || []).length };
+        const bts = await chain.beats().catch(() => ({}));
+        const age = k => (bts[k] && bts[k].at) ? Math.round((Date.now() - bts[k].at) / 1000) : null;
+        out.bg = {
+          live: chain.aliveList(bts),
+          appUrl: !!(process.env.APP_URL || '').trim(),
+          tickKey: !!process.env.TICK_KEY,
+          a: age('a'), b: age('b')
+        };
         try {
           const list = await hunt.ensureTargets(u);
           out.altegio = true;
