@@ -154,7 +154,7 @@ function patchHunt(u, h, patch) {
   if (p.interval !== undefined && store.IVS.includes(Number(p.interval))) h.interval = Number(p.interval);
   L.fitWindow(h);
   const changed = before !== JSON.stringify({ ...h, active: 0, stats: 0, bookings: 0, offers: 0, seen: 0, reminded: 0 });
-  if (changed) { hunt.pruneOffers(u, h); h.seen = {}; }   // фильтр поменялся — анти-дубль обнуляем
+  if (changed) { hunt.pruneOffers(u, h); h.seen = {}; h.noFitSent = 0; }   // фильтр поменялся — анти-дубль и «нет кортов» обнуляем
   return changed;
 }
 
@@ -166,6 +166,7 @@ function sanitize(u, h) {
   h.offers = [];
   h.seen = {};
   h.reminded = {};
+  h.noFitSent = 0;
   u.bo = { fails: 0, ban: 0 };
   u.targets = null; u.svcCache = null;               // список кортов перечитываем заново
   for (const b of h.bookings || []) if (b.start < Date.now() - 3600e3) b.cancelled = true;
@@ -201,7 +202,7 @@ async function startHunt(u, g, h, req, src) {
   await store.setAct({ h: 1, b: 1 });          // чтобы пингер сразу знал: есть что вести
   await chain.drop();
   const okA = await chain.spawn(req, 'a', { confirm: true });
-  await chain.spawn(req, 'b', { confirm: false, delay: 20 });
+  if (chain.STRANDS.includes('b')) await chain.spawn(req, 'b', { confirm: false, delay: 20 });
   if (!okA) {
     const f = await store.loadUser(u.uid);
     const why = !process.env.TICK_KEY ? 'не задан TICK_KEY'

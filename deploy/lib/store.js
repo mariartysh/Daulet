@@ -22,7 +22,13 @@ let cG = null, cGAt = 0, wG = '';            // кэш глобального и
 let cU = {}, cUAt = 0, wU = {}, dU = {};     // кэш пользователей, записанное, несохранённые
 let lastBeat = {}, lastAct = '';
 let cnt = 0, folded = 0;                     // сколько команд отправил этот вызов и сколько из них уже учтено
-const BUDGET = Number(process.env.CMD_BUDGET || 400000);
+let pend = 0;                                // посчитано, но ещё не записано в базу
+// Раньше счётчик прибавлялся при КАЖДОЙ записи глобального состояния — и тем самым
+// сам заставлял писать базу на каждый запрос (панель опрашивалась раз в 7 с → +4 команды).
+// Теперь остаток копится в памяти и уходит в базу либо вместе с другой правкой (бесплатно),
+// либо раз в CMD_FOLD команд.
+const FOLD_MIN = Number(process.env.CMD_FOLD || 300);
+const BUDGET = Number(process.env.CMD_BUDGET || 470000);
 const fresh = (at, maxAge) => !!(maxAge && at && Date.now() - at < maxAge);
 
 async function cmd(arr) {
@@ -39,7 +45,7 @@ async function cmd(arr) {
 
 const MAX_HUNTS = Number(process.env.MAX_HUNTS || 3);
 const MAX_CONTACTS = Number(process.env.MAX_CONTACTS || 5);
-const IVS = [2, 3, 5, 7, 10];                 // допустимые частоты проверки, сек
+const IVS = [1, 2, 3, 5, 7, 10];              // допустимые частоты проверки, сек
 const DEF_IV = Number(process.env.DEF_INTERVAL || 3);
 
 const newId = () => Math.random().toString(36).slice(2, 9);
@@ -99,15 +105,19 @@ function defUser(uid, chat) {
 // Свой счёт ведём в памяти и прикладываем к глобальному состоянию в момент, когда его и так записываем —
 // отдельных обращений к базе счётчик не стоит. Цифра оценочная, но близкая.
 const month = () => new Date().toISOString().slice(0, 7);
-function fold(g) {
-  if (!g.cmd || g.cmd.m !== month()) { g.cmd = { m: month(), n: 0 }; folded = cnt; return g; }
-  g.cmd.n += Math.max(0, cnt - folded);
-  folded = cnt;
+function bump() { pend += Math.max(0, cnt - folded); folded = cnt; }
+// force — прибавить остаток обязательно (зовём в момент, когда база и так пишется)
+function fold(g, force) {
+  bump();
+  if (!g.cmd || g.cmd.m !== month()) { g.cmd = { m: month(), n: 0 }; pend = 0; return g; }
+  if (force || pend >= FOLD_MIN) { g.cmd.n += pend; pend = 0; }
   return g;
 }
-const used = g => (g && g.cmd && g.cmd.m === month() ? g.cmd.n : 0) + Math.max(0, cnt - folded);
+const used = g => (g && g.cmd && g.cmd.m === month() ? g.cmd.n : 0) + pend + Math.max(0, cnt - folded);
 const budget = () => BUDGET;
 const overBudget = g => BUDGET > 0 && used(g) > BUDGET;
+// Обнулить счётчик месяца (аварийно, из /api/health?key=…&resetcmd=1)
+function resetCmd(g) { g.cmd = { m: month(), n: 0 }; pend = 0; folded = cnt; return g; }
 
 // ---------- глобальное ----------
 // maxAge — сколько миллисекунд можно отдавать копию из памяти вызова (0 = всегда читать базу)
@@ -167,8 +177,10 @@ async function saveGlobal(g) {
   fold(g);
   cG = g; cGAt = Date.now();
   if (!live) { mem.g = g; return; }
-  const json = JSON.stringify(g);
+  let json = JSON.stringify(g);
   if (json === wG) return;                   // ничего не изменилось — не тратим команду
+  fold(g, true);                             // раз уж пишем — заодно учтём остаток счётчика
+  json = JSON.stringify(g);
   await cmd(['SET', G, json]);
   wG = json;
 }
@@ -321,10 +333,11 @@ function log(target, m, warn) {
 }
 
 // ---------- сердцебиение фоновых веток ----------
+const BEAT_EVERY = Number(process.env.BEAT_EVERY_MS || 20000);
 async function setBeat(k, run, ttlSec) {
   if (!live) { mem.hb[k] = { at: Date.now(), run }; return; }
   const key = k + ':' + run;
-  if (lastBeat[key] && Date.now() - lastBeat[key] < 20000) return;   // ветка считается живой 45 с — чаще отмечаться незачем
+  if (lastBeat[key] && Date.now() - lastBeat[key] < BEAT_EVERY) return;   // ветка считается живой 45 с — чаще отмечаться незачем
   lastBeat[key] = Date.now();
   await cmd(['SET', HB(k), JSON.stringify({ at: Date.now(), run }), 'EX', String(ttlSec || 120)]);
 }
@@ -359,6 +372,6 @@ async function clearBeats() {
 module.exports = {
   live, IVS, DEF_IV, MAX_HUNTS, MAX_CONTACTS, newId, newHunt, isoToday,
   loadGlobal, saveGlobal, loadUser, loadOrCreate, loadUsers, saveUser, dropUser,
-  markDirty, dirtyFor, setAct, getAct, used, budget, overBudget, fold,
+  markDirty, dirtyFor, setAct, getAct, used, budget, overBudget, fold, resetCmd,
   log, setBeat, beats, clearBeats
 };

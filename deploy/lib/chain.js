@@ -11,7 +11,11 @@
 // abort() выглядел для Vercel как «клиент ушёл» и убивал только что запущенное звено.
 const store = require('./store');
 
-const STRANDS = ['a', 'b'];
+// Ветка B — только страховка. Она сама ничего не ищет, но стоит ~6 обращений к базе
+// в минуту. Пингер раз в минуту поднимает A не хуже, поэтому B по умолчанию выключена.
+// Включить: переменная окружения STRAND_B=1.
+const USE_B = /^(1|true|on|yes|да)$/i.test(String(process.env.STRAND_B || ''));
+const STRANDS = USE_B ? ['a', 'b'] : ['a'];
 const TTL = 45e3;                       // ветка жива, если отметилась меньше 45 сек назад
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -41,7 +45,7 @@ async function spawn(req, strand, opts) {
     fetch(url, { headers: { 'x-chain': '1' }, cache: 'no-store' }).catch(() => {});
     if (!o.confirm) { await sleep(1200); return true; }   // ждём, чтобы запрос успел уйти до заморозки инстанса
     for (let i = 0; i < 4; i++) {
-      await sleep(700);
+      await sleep(i === 0 ? 1500 : 900);      // холодный старт функции — первую проверку делаем позже, зато реже читаем базу
       const b = await beats().catch(() => null);
       if (b && b[strand] && b[strand].run === run) return true;
     }
@@ -52,7 +56,7 @@ async function spawn(req, strand, opts) {
 // Поднять все мёртвые ветки
 async function revive(req, opts) {
   const o = opts || {};
-  const b = await beats().catch(() => ({}));
+  const b = o.beats || await beats().catch(() => ({}));   // если вызывающий уже читал — не читаем второй раз
   const started = [];
   for (const k of STRANDS) {
     if (alive(b, k)) continue;
@@ -61,4 +65,4 @@ async function revive(req, opts) {
   return started;
 }
 
-module.exports = { STRANDS, TTL, sleep, baseUrl, at, alive, aliveList, beat, beats, drop, spawn, revive };
+module.exports = { STRANDS, USE_B, TTL, sleep, baseUrl, at, alive, aliveList, beat, beats, drop, spawn, revive };

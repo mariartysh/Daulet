@@ -77,6 +77,19 @@ module.exports = async (req, res) => {
     out.подходит_под_фильтр = targets.filter(t => L.courtOk(h, t)).length;
 
     const dates = L.taskDates(h, Date.now());
+    // Сколько запросов к сайту стоит ОДНА проверка этой охоты: корты × дни.
+    // Это и есть то, что упирается в лимиты сайта, — сузьте фильтр, и можно идти чаще.
+    const perSweep = out.подходит_под_фильтр * Math.max(1, dates.length);
+    out.темп = {
+      запросов_на_проверку: perSweep,
+      частота_сек: h.interval,
+      запросов_в_секунду: perSweep && h.interval ? +(perSweep / h.interval).toFixed(1) : 0,
+      давление_сайта: alt.pressureNow() + '%',
+      множитель_интервала: +alt.slowFactor().toFixed(2),
+      совет: perSweep > 4
+        ? 'Больше 4 запросов на проверку — сайт быстро начнёт отвечать 429. Сузьте тип/номера кортов или оставьте один день: тогда можно ставить частоту 1 с.'
+        : 'Запросов мало — можно смело ставить частоту 1 с.'
+    };
     out.дни_охоты = dates.map(d => d.iso + (d.carry ? ' (ночные слоты)' : ''));
     out.расписание = [];
     for (const t of targets.filter(x => L.courtOk(h, x)).slice(0, 3)) {

@@ -320,7 +320,7 @@ async function doAuth(pw){
     $('gate').style.display='none';
     document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');
     refresh();
-    if(!window.__loop){window.__loop=setInterval(refresh,15000);}
+    if(!window.__loop){window.__loop=setInterval(refresh,30000);}
     return true;
   }
   if(pw===undefined){buzz('error');$('pwErr').textContent=(r.error||'Не вышло войти')+(r.detail?' · '+r.detail:'');$('pwErr').style.display='block';}
@@ -725,7 +725,7 @@ async function refresh(){
     const r=await api('state');
     if(r.ok){S=r;HID=(S.hunts.find(h=>h.active)||S.hunts[0]||{}).id||'';
       document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');
-      render();window.__loop=setInterval(refresh,7000);return;}
+      render();window.__loop=setInterval(refresh,20000);return;}
     TOKEN='';stg.set('ch_token','');
   }
   if(await doAuth(''))return;                       // Telegram или личная ссылка — без пароля

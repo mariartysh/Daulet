@@ -100,10 +100,11 @@ const leftForDay = (h, iso) => {
 
 // Фактическая пауза между проверками. Автозамедление при сбоях и бане.
 function pace(u, h) {
-  const base = Math.max(2, Math.min(60, Number((h && h.interval) || 3))) * 1000;
+  const base = Math.max(1, Math.min(60, Number((h && h.interval) || 3))) * 1000;
   if (alt.banned()) return Math.max(20000, alt.banLeft());
   const f = (u.bo && u.bo.fails) || 0;
-  return f >= 6 ? 60000 : f >= 3 ? 30000 : base;
+  const raw = f >= 6 ? 60000 : f >= 3 ? 30000 : base;
+  return Math.round(raw * alt.slowFactor());   // сайт нервничает — сами сбавляем, не дожидаясь бана
 }
 
 async function noteResult(u, h, r) {
@@ -205,16 +206,20 @@ async function sweep(u, h) {
     const inC = targets.filter(x => x.indoor === true).length, outC = targets.filter(x => x.indoor === false).length;
     const t = h.type === 'indoor' ? 'крытые' : h.type === 'outdoor' ? 'открытые' : 'любой тип';
     const nums = h.courts && h.courts.length ? ' №' + h.courts.join(', ') : '';
-    const why = `фильтр «${t}${nums}» не совпал ни с одним кортом. На сайте вижу: крытых ${inC}, открытых ${outC}. Смените тип или номер корта.`;
-    if (Date.now() - (h.noFitAt || 0) > 5 * 60e3) {
-      h.noFitAt = Date.now();
+    const why = `фильтр «${t}${nums}» не совпал ни с одним кортом. На сайте вижу: крытых ${inC}, открытых ${outC}.`;
+    // Это не сбой, а настройка: пока фильтр не поменяют, ситуация не изменится сама.
+    // Поэтому предупреждаем РОВНО ОДИН РАЗ и дальше следим молча.
+    // Флаг снимается, когда корты всё-таки появятся, когда поменяют план охоты
+    // или когда охоту запустят заново.
+    if (!h.noFitSent) {
+      h.noFitSent = Date.now();
       log(u, `${label(h)}: ${why}`, 1);
-      await notifyError(u, `${label(h)}: ${why}`);
+      await sendTo(u, `🔎 <b>${label(h)}</b>\nПод ваш фильтр сейчас нет ни одного корта: ${why}\n\nПродолжаю следить молча — повторять это сообщение не буду. Поменяете тип или номера кортов — скажу заново.`);
     }
     if (u.bo && u.bo.fails) u.bo.fails = 0;   // запросов не было — старые «сбои» не в счёт
     return { skipped: 'filter', why };
   }
-  h.noFitAt = 0;
+  h.noFitSent = 0;
   const dates = L.taskDates(h, now);
 
   // Опрашиваем ТОЛЬКО корты и дни из фильтра — меньше запросов, выше темп.
@@ -278,7 +283,12 @@ async function sweep(u, h) {
       if (r && r.ok) leftBy[pd]--;
     } else if (asked < 4) { await offerSlot(u, h, f); asked++; }
   }
-  if (!foundNew.length) log(u, `${label(h)} · проверка №${h.stats.checks}: свободного нет, слежу дальше`);
+  // Раньше строка писалась на КАЖДОЙ проверке: при частоте 2 с журнал полностью
+  // обновлялся за четыре минуты, а профиль из-за этого переписывался в базу вхолостую.
+  if (!foundNew.length && Date.now() - (h.quietAt || 0) > 60e3) {
+    h.quietAt = Date.now();
+    log(u, `${label(h)} · проверка №${h.stats.checks}: свободного нет, слежу дальше`);
+  }
   if (leftSlots(h) <= 0) await finishHunt(u, h);
   return { found: foundNew.length, courts: courts.length, apiOk, apiFail, ban };
 }

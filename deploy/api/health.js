@@ -63,11 +63,24 @@ module.exports = async (req, res) => {
         out.данные.длина_пароля_в_базе = sp.length;
       }
     }
+    // Аварийный сброс счётчика: /api/health?key=TICK_KEY&resetcmd=1
+    // Нужен, когда реальный расход в Upstash ниже нашей оценки (например, вы завели новую базу),
+    // а бот всё ещё держит охоты на паузе.
+    if (full && /^(1|true|yes|да)$/i.test(String((req.query || {}).resetcmd || ''))) {
+      const было = store.used(g);
+      store.resetCmd(g);
+      store.log(g, `Счётчик обращений к базе сброшен вручную (было ${было})`);
+      await store.saveGlobal(g);
+      out.сброс_счётчика = `готово — было ${было}, стало 0. Охоты можно запускать снова.`;
+    }
+    const u_ = store.used(g), b_ = store.budget();
     out.команды_к_базе = {
-      за_этот_месяц_оценка: store.used(g),
-      бюджет_автостопа: store.budget(),
+      за_этот_месяц_оценка: u_,
+      бюджет_автостопа: b_ || 'проверка выключена (CMD_BUDGET=0)',
+      израсходовано: b_ ? Math.round(u_ / b_ * 100) + '%' : '—',
       бесплатный_лимит_upstash: 500000,
-      состояние: store.overBudget(g) ? 'БЮДЖЕТ ИСЧЕРПАН — охоты стоят на паузе' : 'в норме'
+      состояние: store.overBudget(g) ? 'БЮДЖЕТ ИСЧЕРПАН — охоты стоят на паузе' : 'в норме',
+      сброс: 'добавьте &resetcmd=1 к этому адресу (нужен ключ)'
     };
     const b = await store.beats().catch(() => ({}));
     out.фоновый_поиск = { ветка_A: ms(b.a && b.a.at), ветка_B: ms(b.b && b.b.at) };
@@ -88,7 +101,7 @@ module.exports = async (req, res) => {
       };
     } catch (e) { out.вебхук = 'не проверить: ' + e.message; }
   } else if (!full) {
-    out.подсказка = 'Добавьте ?key=ВАШ_TICK_KEY — покажу состояние вебхука Telegram. Сменить пароль: ?key=ВАШ_TICK_KEY&setpass=НовыйПароль';
+    out.подсказка = 'Добавьте ?key=ВАШ_TICK_KEY — покажу состояние вебхука Telegram. Сменить пароль: ?key=ВАШ_TICK_KEY&setpass=НовыйПароль · Сбросить счётчик базы: ?key=ВАШ_TICK_KEY&resetcmd=1';
   }
 
   return res.status(200).json(out);

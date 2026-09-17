@@ -11,13 +11,17 @@ const hunt = require('../lib/hunt');
 const chain = require('../lib/chain');
 const L = require('../lib/logic');
 
+// Все окна кэша вынесены в переменные окружения: если однажды понадобится
+// реакция побыстрее — поднимаете тариф базы и уменьшаете числа, код трогать не надо.
 const WORK_MS = 44000;
 const WATCH_MS = 10000;
 const TAKEOVER = 30000;
 const FLOOR_MS = 20000;
-const G_FRESH = 20000;      // глобальное состояние можно брать из памяти до 20 с
-const U_FRESH = 8000;       // профили — до 8 с (стоп из панели подхватывается быстро)
-const SAVE_MS = 20000;      // обычные изменения пишем не чаще раза в 20 с
+const N = (k, d) => Number(process.env[k] || d);
+const G_FRESH = N('G_FRESH_MS', 60000);     // глобальное состояние берём из памяти до 60 с
+const U_FRESH = N('U_FRESH_MS', 30000);     // профили — до 30 с (стоп из панели подхватится за полминуты)
+const SAVE_MS = N('SAVE_MS', 45000);        // обычные изменения пишем не чаще раза в 45 с
+const BEATS_MS = N('BEATS_MS', 20000);      // как часто звено сверяется с соседями
 
 const authOk = req => {
   const q = req.query || {};
@@ -41,7 +45,7 @@ async function sweepAll() {
       for (const h of u.hunts) { h.active = false; h.actBy = 'budget'; }
       store.log(u, 'Охоты остановлены: израсходован месячный бюджет обращений к базе', 1);
       await store.saveUser(u, { merge: true });
-      await hunt.sendTo(u, '⚠️ <b>Остановил охоты</b>\nМесячный бюджет обращений к базе исчерпан — иначе бот ляжет целиком.\nОбновится 1-го числа. Можно поднять потолок переменной CMD_BUDGET или перевести базу на платный тариф.').catch(() => {});
+      await hunt.sendTo(u, '⚠️ <b>Остановил охоты</b>\nМесячный счётчик обращений к базе дошёл до потолка — иначе бот ляжет целиком.\nСбросится 1-го числа. Сбросить вручную: откройте <code>/api/health?key=ВАШ_TICK_KEY&amp;resetcmd=1</code>. Потолок задаётся переменной CMD_BUDGET (0 — выключить проверку).').catch(() => {});
     }
     await store.setAct({ h: 0, b: 0 });
     await store.saveGlobal(g);
@@ -74,7 +78,7 @@ async function sweepAll() {
     }
   }
   await store.setAct({ h: hAct, b: bAct });
-  return { any, pace: Math.max(2000, pace), results };
+  return { any, pace: Math.max(N('MIN_PACE_MS', 900), pace), results };
 }
 
 // ---------- звено ветки ----------
@@ -95,7 +99,7 @@ async function link(req, res, strand, run, delaySec) {
   let sweeps = 0, stop = '', respawn = 0, pace = first.pace;
   let b = {}, seen = 0;
   while (Date.now() < until) {
-    if (Date.now() - seen > 9000) { b = await chain.beats().catch(() => ({})); seen = Date.now(); }
+    if (Date.now() - seen > BEATS_MS) { b = await chain.beats().catch(() => ({})); seen = Date.now(); }
     if (b[strand] && b[strand].run && b[strand].run !== run) { stop = 'taken'; break; }
     await chain.beat(strand, run);
 
@@ -123,8 +127,10 @@ async function link(req, res, strand, run, delaySec) {
     if (still) {
       handed = await chain.spawn(req, strand, { confirm: true });
       const other = strand === 'a' ? 'b' : 'a';
-      const b2 = await chain.beats().catch(() => ({}));
-      if (!chain.alive(b2, other)) neighbour = await chain.spawn(req, other, { confirm: false, delay: other === 'b' ? 20 : 0 });
+      if (chain.STRANDS.includes(other)) {
+        const b2 = await chain.beats().catch(() => ({}));
+        if (!chain.alive(b2, other)) neighbour = await chain.spawn(req, other, { confirm: false, delay: other === 'b' ? 20 : 0 });
+      }
     } else await chain.drop();
   }
   return res.status(200).json({ ok: true, at: L.fmt(Date.now()), strand, run, sweeps, pace, stop: stop || 'budget', handed, neighbour });
@@ -148,7 +154,9 @@ async function guard(req, res) {
   const a = await store.getAct();
   // Ни охот, ни броней — выходим сразу. В простое время это 1 команда в минуту.
   if (a && !a.h && !a.b) return res.status(200).json({ ok: true, active: false, idle: true });
-  if (!(await anyActive())) {
+  // Ключ уже сказал «охоты идут» — верим ему и не перечитываем всё состояние заново.
+  const active = (a && a.h) ? true : await anyActive();
+  if (!active) {
     await chain.drop();
     const g = await store.loadGlobal(G_FRESH);
     const users = await store.loadUsers((g.users || []).filter(x => !x.blocked), U_FRESH);
@@ -160,7 +168,7 @@ async function guard(req, res) {
   const age = Math.max(chain.at(b, 'a'), chain.at(b, 'b'));
   let swept = false;
   if (!age || Date.now() - age > FLOOR_MS) { await sweepAll(); swept = true; }
-  const started = await chain.revive(req, { confirm: true });
+  const started = await chain.revive(req, { confirm: true, beats: b });
   return res.status(200).json({ ok: true, at: L.fmt(Date.now()), alive: wasAlive, started, swept });
 }
 
