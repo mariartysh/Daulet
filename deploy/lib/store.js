@@ -28,7 +28,7 @@ let pend = 0;                                // посчитано, но ещё 
 // Теперь остаток копится в памяти и уходит в базу либо вместе с другой правкой (бесплатно),
 // либо раз в CMD_FOLD команд.
 const FOLD_MIN = Number(process.env.CMD_FOLD || 300);
-const BUDGET = Number(process.env.CMD_BUDGET || 470000);
+const BUDGET = Number(process.env.CMD_BUDGET || 440000);
 const fresh = (at, maxAge) => !!(maxAge && at && Date.now() - at < maxAge);
 
 async function cmd(arr) {
@@ -109,7 +109,10 @@ function bump() { pend += Math.max(0, cnt - folded); folded = cnt; }
 // force — прибавить остаток обязательно (зовём в момент, когда база и так пишется)
 function fold(g, force) {
   bump();
-  if (!g.cmd || g.cmd.m !== month()) { g.cmd = { m: month(), n: 0 }; pend = 0; return g; }
+  // Раньше у свежего объекта (ещё без поля cmd) остаток просто выбрасывался —
+  // это и был один из источников недосчёта.
+  if (!g.cmd) g.cmd = { m: month(), n: 0 };
+  if (g.cmd.m !== month()) { g.cmd = { m: month(), n: 0 }; pend = 0; return g; }   // новый месяц — с нуля
   if (force || pend >= FOLD_MIN) { g.cmd.n += pend; pend = 0; }
   return g;
 }
@@ -118,6 +121,21 @@ const budget = () => BUDGET;
 const overBudget = g => BUDGET > 0 && used(g) > BUDGET;
 // Обнулить счётчик месяца (аварийно, из /api/health?key=…&resetcmd=1)
 function resetCmd(g) { g.cmd = { m: month(), n: 0 }; pend = 0; folded = cnt; return g; }
+
+// Сбросить накопленный остаток в базу ПЕРЕД тем, как вызов функции умрёт.
+// Без этого счётчик систематически врал в меньшую сторону: звено фонового поиска живёт
+// 44 секунды, успевает сделать ~10 обращений и исчезает, так и не записав их.
+// Именно поэтому бот показывал 400 тысяч, когда на деле было 758.
+// Одиночные вызовы (пингер вхолостую — одно обращение) не сбрасываем: ради одной команды
+// делать вторую бессмысленно. Этот остаток учтён запасом в CMD_BUDGET.
+const FLUSH_MIN = Number(process.env.CMD_FLUSH || 3);
+async function flushCmd() {
+  bump();
+  if (pend < FLUSH_MIN || !cG) return false;
+  fold(cG, true);
+  await saveGlobal(cG).catch(() => {});
+  return true;
+}
 
 // ---------- глобальное ----------
 // maxAge — сколько миллисекунд можно отдавать копию из памяти вызова (0 = всегда читать базу)
@@ -225,6 +243,30 @@ async function loadUser(uid, maxAge) {
   if (cU[uid] && dU[uid]) { try { u = mergeUser(u, cU[uid]); } catch (e) {} }
   cU[uid] = u; wU[uid] = raw; cUAt = Date.now();
   return u;
+}
+
+// Панель на каждый опрос читала глобальное состояние, профиль и сердцебиения —
+// три отдельных чтения. MGET забирает всё это одной командой.
+async function loadBundle(uid) {
+  if (!live || !uid) {
+    return { g: await loadGlobal(), u: uid ? await loadUser(uid) : null, beats: await beats() };
+  }
+  const r = await cmd(['MGET', G, UK(uid), HB('a'), HB('b'), ACT]);
+  const parse = x => { try { return x ? JSON.parse(x) : null; } catch { return null; } };
+
+  let g;
+  if (r && r[0]) { try { g = Object.assign(defGlobal(), JSON.parse(r[0])); } catch {} }
+  if (!g) g = await readGlobal();                 // пусто или битое — обычный путь с миграцией
+  cG = g; cGAt = Date.now();
+
+  let u = null;
+  if (r && r[1]) {
+    try { u = fixUser(JSON.parse(r[1])); } catch { u = defUser(uid); }
+    if (cU[uid] && dU[uid]) { try { u = mergeUser(u, cU[uid]); } catch (e) {} }
+    cU[uid] = u; wU[uid] = r[1]; cUAt = Date.now();
+  }
+
+  return { g, u, beats: { a: parse(r && r[2]), b: parse(r && r[3]), act: parse(r && r[4]) } };
 }
 
 async function loadOrCreate(uid, chat) {
@@ -357,11 +399,13 @@ async function getAct() {
     return r ? JSON.parse(r) : null;
   } catch { return null; }
 }
+// MGET нескольких ключей стоит РОВНО ОДНУ команду, поэтому забираем заодно и ch:act:
+// пингеру больше не нужно отдельное чтение «есть ли активные охоты».
 async function beats() {
-  if (!live) return { a: mem.hb.a || null, b: mem.hb.b || null };
-  const r = await cmd(['MGET', HB('a'), HB('b')]);
+  if (!live) return { a: mem.hb.a || null, b: mem.hb.b || null, act: mem.act ? JSON.parse(mem.act) : null };
+  const r = await cmd(['MGET', HB('a'), HB('b'), ACT]);
   const parse = x => { try { return x ? JSON.parse(x) : null; } catch { return null; } };
-  return { a: parse(r && r[0]), b: parse(r && r[1]) };
+  return { a: parse(r && r[0]), b: parse(r && r[1]), act: parse(r && r[2]) };
 }
 async function clearBeats() {
   mem.hb = {}; lastBeat = {};
@@ -372,6 +416,6 @@ async function clearBeats() {
 module.exports = {
   live, IVS, DEF_IV, MAX_HUNTS, MAX_CONTACTS, newId, newHunt, isoToday,
   loadGlobal, saveGlobal, loadUser, loadOrCreate, loadUsers, saveUser, dropUser,
-  markDirty, dirtyFor, setAct, getAct, used, budget, overBudget, fold, resetCmd,
+  markDirty, dirtyFor, setAct, getAct, loadBundle, used, budget, overBudget, fold, resetCmd, flushCmd,
   log, setBeat, beats, clearBeats
 };

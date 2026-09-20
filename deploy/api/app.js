@@ -42,11 +42,21 @@ function initUser(initData) {
 
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
+  // Перед самым ответом дописываем в базу израсходованные обращения: точек выхода
+  // у панели много, поэтому перехватываем json один раз здесь, а не в каждой ветке.
+  const rawJson = res.json.bind(res);
+  res.json = function (payload) {
+    return store.flushCmd().catch(() => {}).then(() => rawJson(payload));
+  };
   if (req.method !== 'POST') return res.status(405).json({ ok: false });
   let body = req.body || {};
   if (typeof body === 'string') { try { body = JSON.parse(body); } catch { body = {}; } }
-  let g;
-  try { g = await store.loadGlobal(); }
+  // Если запрос уже авторизован, забираем глобальное состояние, профиль и сердцебиения
+  // ОДНИМ обращением к базе вместо трёх. Дальнейшие loadGlobal/loadUser попадут в кэш.
+  let g, bundle = null;
+  const uidHint = body.action === 'auth' ? 0 : svc.readToken(req.headers['x-auth']);
+  if (uidHint) { try { bundle = await store.loadBundle(uidHint); } catch (e) { bundle = null; } }
+  try { g = bundle ? bundle.g : await store.loadGlobal(); }
   catch (e) {
     const msg = store.live ? 'База не отвечает: ' + e.message : 'Хранилище не настроено — задайте UPSTASH_REDIS_REST_URL и TOKEN';
     return res.status(200).json(Object.assign({ ok: false, error: msg }, body.action === 'auth' ? { need: 'password' } : {}));
@@ -84,7 +94,7 @@ module.exports = async (req, res) => {
   if (!uid) return res.status(401).json({ ok: false, error: 'auth' });
   const row = svc.userRow(g, uid);
   if (!row || row.blocked) return res.status(401).json({ ok: false, error: 'auth' });
-  const u = await store.loadUser(uid);
+  const u = (bundle && bundle.u) || await store.loadUser(uid, 5000);
   if (!u) return res.status(401).json({ ok: false, error: 'auth' });
   svc.bind(g, u);
   const admin = svc.isAdmin(g, uid);
@@ -93,7 +103,7 @@ module.exports = async (req, res) => {
   try {
     switch (body.action) {
       case 'state': {
-        const bts = await chain.beats().catch(() => ({}));
+        const bts = (bundle && bundle.beats) || await chain.beats().catch(() => ({}));
         const live = chain.aliveList(bts);
         if (!live.length) {
           const started = await svc.kick(req, u);
@@ -193,7 +203,7 @@ module.exports = async (req, res) => {
       }
       case 'probe': {
         const out = { tg: !!process.env.TELEGRAM_TOKEN, chat: !!u.chat, kv: store.live, users: (g.users || []).length };
-        const bts = await chain.beats().catch(() => ({}));
+        const bts = (bundle && bundle.beats) || await chain.beats().catch(() => ({}));
         const age = k => (bts[k] && bts[k].at) ? Math.round((Date.now() - bts[k].at) / 1000) : null;
         out.bg = {
           live: chain.aliveList(bts),

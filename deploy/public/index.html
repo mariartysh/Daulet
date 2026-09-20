@@ -320,7 +320,7 @@ async function doAuth(pw){
     $('gate').style.display='none';
     document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');
     refresh();
-    if(!window.__loop){window.__loop=setInterval(refresh,30000);}
+    if(!window.__loop){window.__loop=setInterval(tickPoll,30000);}
     return true;
   }
   if(pw===undefined){buzz('error');$('pwErr').textContent=(r.error||'Не вышло войти')+(r.detail?' · '+r.detail:'');$('pwErr').style.display='block';}
@@ -657,13 +657,23 @@ async function resetAll(){
   const r=await api('reset',{huntId:h.id});buzz(r.ok?'success':'error');
   toast(r.ok?'Очистил':'Не вышло');refresh();
 }
+// Панель в фоновой вкладке раньше продолжала опрашивать сервер круглые сутки —
+// это была одна из главных статей расхода базы. Теперь в фоне опрос замирает,
+// а при возвращении на вкладку данные обновляются сразу.
+function tickPoll(){ if(document.visibilityState==='visible') refresh(); }
+document.addEventListener('visibilitychange',function(){ if(document.visibilityState==='visible') refresh(); });
+
 async function probe(){
   toast('Проверяю связь…');const r=await api('probe');
   if(!r.ok)return toast('Что-то не так с сервером');
   const p=r.probe,bg=p.bg||{};
+  // Фоновый поиск живёт только пока идёт хотя бы одна охота. Нет охот — веток и не должно быть,
+  // это не поломка. Раньше в этом случае панель зря пугала надписью «проверьте пингер».
+  const running=!!(S&&S.hunts&&S.hunts.some(h=>h.active));
   const bgTxt=!bg.tickKey?'❌ не задан TICK_KEY'
     :(bg.live&&bg.live.length?'✅ '+bg.live.join('+').toUpperCase()+(bg.a!=null?', отметка '+bg.a+' с назад':'')
-                             :'❌ ветки молчат'+(bg.appUrl?' — проверьте пингер':' — не задан APP_URL'));
+      :(!running?'⏸ охоты не запущены — так и должно быть'
+                :'❌ ветки молчат'+(bg.appUrl?' — запустите охоту заново или проверьте пингер':' — не задан APP_URL')));
   toast('Сайт кортов: '+(p.altegio?'✅ кортов '+p.courts+' (под фильтр '+p.matching+')':'❌')
     +' · Telegram: '+(p.tg?(p.chat?'✅':'⚠️ чат не привязан'):'❌')+' · Память: '+(p.kv?'✅':'⚠️ временная')
     +' · Фоновый поиск: '+bgTxt
@@ -725,7 +735,7 @@ async function refresh(){
     const r=await api('state');
     if(r.ok){S=r;HID=(S.hunts.find(h=>h.active)||S.hunts[0]||{}).id||'';
       document.querySelectorAll('[data-app]').forEach(x=>x.style.display='');
-      render();window.__loop=setInterval(refresh,20000);return;}
+      render();window.__loop=setInterval(tickPoll,20000);return;}
     TOKEN='';stg.set('ch_token','');
   }
   if(await doAuth(''))return;                       // Telegram или личная ссылка — без пароля

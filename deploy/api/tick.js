@@ -30,7 +30,22 @@ const authOk = req => {
 };
 
 // Один проход по всем пользователям. Возвращает {any, pace, results}
+// Ночная пауза. Vercel на бесплатном тарифе считает не запросы, а ВРЕМЯ жизни функции,
+// поэтому каждый час простоя охоты стоит денег в его лимитах. Если вам не нужен поиск
+// глубокой ночью — задайте переменную QUIET_HOURS, например 01:00-07:00, и бот в это
+// время спит целиком. По умолчанию выключено: ищет круглосуточно.
+function inQuietHours() {
+  const q = String(process.env.QUIET_HOURS || '').trim();
+  const m = q.match(/^(\d{1,2}):(\d{2})\s*[-–]\s*(\d{1,2}):(\d{2})$/);
+  if (!m) return false;
+  const off = (Number(process.env.TZ_OFFSET) || 5) * 60;
+  const local = (Math.floor(Date.now() / 60000) + off) % 1440;
+  const from = +m[1] * 60 + +m[2], to = +m[3] * 60 + +m[4];
+  return from <= to ? (local >= from && local < to) : (local >= from || local < to);
+}
+
 async function sweepAll() {
+  if (inQuietHours()) return { any: false, pace: 60000, quiet: true };
   const g = await store.loadGlobal(G_FRESH);
   if (g.botOn === false) { await store.setAct({ h: 0, b: 0 }); return { any: false, pace: 60000, off: true }; }
   const rows = (g.users || []).filter(x => !x.blocked);
@@ -87,7 +102,7 @@ async function link(req, res, strand, run, delaySec) {
   await chain.beat(strand, run);
   // Ветка A работает, B только страхует — лишних запросов к сайту не делаем.
   const first = strand === 'a' ? await sweepAll() : { any: await anyActive(true), pace: 10000 };
-  if (!first.any) { await chain.drop(); return res.status(200).json({ ok: true, strand, idle: true }); }
+  if (!first.any) { await chain.drop(); await store.flushCmd(); return res.status(200).json({ ok: true, strand, idle: true }); }
   if (!chain.alive(before, strand)) {
     const g = await store.loadGlobal(G_FRESH);
     store.log(g, `Фоновый поиск запущен (ветка ${strand.toUpperCase()})`);
@@ -133,6 +148,7 @@ async function link(req, res, strand, run, delaySec) {
       }
     } else await chain.drop();
   }
+  await store.flushCmd();   // записать израсходованное, пока звено ещё живо
   return res.status(200).json({ ok: true, at: L.fmt(Date.now()), strand, run, sweeps, pace, stop: stop || 'budget', handed, neighbour });
 }
 
@@ -151,8 +167,11 @@ async function anyActive(cheap) {
 
 // ---------- пингер ----------
 async function guard(req, res) {
-  const a = await store.getAct();
-  // Ни охот, ни броней — выходим сразу. В простое время это 1 команда в минуту.
+  // Одно чтение приносит и сердцебиения веток, и признак «есть ли активные охоты».
+  // Раньше на это уходило два обращения, а в простое пингер зовётся круглые сутки.
+  const b0 = await chain.beats().catch(() => ({}));
+  const a = b0.act;
+  // Ни охот, ни броней — выходим сразу. В простое это 1 команда на вызов пингера.
   if (a && !a.h && !a.b) return res.status(200).json({ ok: true, active: false, idle: true });
   // Ключ уже сказал «охоты идут» — верим ему и не перечитываем всё состояние заново.
   const active = (a && a.h) ? true : await anyActive();
@@ -161,14 +180,16 @@ async function guard(req, res) {
     const g = await store.loadGlobal(G_FRESH);
     const users = await store.loadUsers((g.users || []).filter(x => !x.blocked), U_FRESH);
     for (const u of users) { svc.bind(g, u); try { await hunt.reminders(u); await store.saveUser(u); } catch (e) {} }
+    await store.flushCmd();
     return res.status(200).json({ ok: true, active: false });
   }
-  const b = await chain.beats().catch(() => ({}));
+  const b = b0;                      // то же чтение, что и выше — второй раз базу не трогаем
   const wasAlive = chain.aliveList(b);
   const age = Math.max(chain.at(b, 'a'), chain.at(b, 'b'));
   let swept = false;
   if (!age || Date.now() - age > FLOOR_MS) { await sweepAll(); swept = true; }
   const started = await chain.revive(req, { confirm: true, beats: b });
+  await store.flushCmd();
   return res.status(200).json({ ok: true, at: L.fmt(Date.now()), alive: wasAlive, started, swept });
 }
 
