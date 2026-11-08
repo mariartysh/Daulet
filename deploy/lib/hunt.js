@@ -9,6 +9,7 @@
 const alt = require('./altegio');
 const tg = require('./tg');
 const L = require('./logic');
+const M = require('./morning');
 const { log } = require('./store');
 
 const CACHE_TTL = 3 * 3600e3;
@@ -100,10 +101,13 @@ const leftForDay = (h, iso) => {
 
 // Фактическая пауза между проверками. Автозамедление при сбоях и бане.
 function pace(u, h) {
-  const base = Math.max(1, Math.min(60, Number((h && h.interval) || 3))) * 1000;
+  // Утренний забег (окно около 07:00) идёт на своей частоте, а не на выбранной в охоте.
+  const quick = M.fast(h);
+  const base = quick ? M.PACE_MS : Math.max(1, Math.min(60, Number((h && h.interval) || 3))) * 1000;
   if (alt.banned()) return Math.max(20000, alt.banLeft());
   const f = (u.bo && u.bo.fails) || 0;
-  const raw = f >= 6 ? 60000 : f >= 3 ? 30000 : base;
+  // Окно короткое: при сбоях сайта ждём не 30–60 с, а всего 5 с.
+  const raw = quick ? (f >= 3 ? Math.max(base, 5000) : base) : (f >= 6 ? 60000 : f >= 3 ? 30000 : base);
   return Math.round(raw * alt.slowFactor());   // сайт нервничает — сами сбавляем, не дожидаясь бана
 }
 
@@ -146,6 +150,14 @@ async function autoStop(u, h) {
     return true;
   }
   if (leftSlots(h) <= 0) { await finishHunt(u, h); return true; }
+  if (M.windowOver(h)) {
+    // Утренний забег закончился: охота спит до завтра, а «daily» остаётся включённым.
+    h.active = false; h.actBy = 'morning';
+    const d = dayPlan(h)[0], got = d ? Math.min(d.need, d.got) : 0;
+    log(u, `${label(h)}: утренний забег закончен${d ? ` — поймано ${got} из ${d.need}` : ''}`);
+    await sendTo(u, `☀️ <b>${label(h)}</b>\nУтренний забег закончен: ${got ? `поймал ${got} из ${d.need}` : `на ${L.isoWord(h.days[0])} ничего не освободилось`}. Завтра в ${M.startText()} попробую снова.`);
+    return true;
+  }
   if (expired(h)) {
     h.active = false; h.actBy = 'bg';
     log(u, `${label(h)}: 12 часов поиска — остановлена`, 1);
@@ -227,7 +239,8 @@ async function sweep(u, h) {
   for (const d of dates) for (const c of courts) combos.push({ d, c });
   const start = h.rot % combos.length;
   const batchList = [];
-  for (let i = 0; i < Math.min(COMBO_CAP, combos.length); i++) batchList.push(combos[(start + i) % combos.length]);
+  const cap = M.fast(h) ? Math.max(COMBO_CAP, M.CAP) : COMBO_CAP;   // в утреннем окне весь день × все корты — за один круг
+  for (let i = 0; i < Math.min(cap, combos.length); i++) batchList.push(combos[(start + i) % combos.length]);
   h.rot = (start + batchList.length) % combos.length;
 
   const leftBy = {};
