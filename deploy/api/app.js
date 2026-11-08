@@ -7,6 +7,7 @@ const hunt = require('../lib/hunt');
 const chain = require('../lib/chain');
 const alt = require('../lib/altegio');
 const L = require('../lib/logic');
+const morning = require('../lib/morning');
 
 const bookView = b => {
   const d = L.deadlines(b.start);
@@ -25,7 +26,7 @@ function huntView(u, h) {
   return {
     id: h.id, title: h.title, label: hunt.label(h), active: !!h.active,
     mode: h.mode, needed: h.needed, type: h.type, courts: h.courts, cIdx: h.cIdx || [],
-    days: h.days, timeFrom: h.timeFrom, timeTo: h.timeTo, interval: h.interval,
+    days: h.days, timeFrom: h.timeFrom, timeTo: h.timeTo, interval: h.interval, daily: !!h.daily,
     goal: hunt.goalSlots(h), booked: hunt.bookedSlots(h),
     perDay: hunt.dayPlan(h).map(d => ({ iso: d.iso, need: d.need, got: Math.min(d.need, d.got) })),
     pace: Math.round(hunt.pace(u, h) / 1000),
@@ -118,6 +119,7 @@ module.exports = async (req, res) => {
           me: { uid, name: u.name, u: u.u, admin },
           botOn: g.botOn !== false,
           maxHunts: store.MAX_HUNTS, maxContacts: store.MAX_CONTACTS, intervals: store.IVS,
+          morning: morning.info(),
           contacts: u.contacts || [],
           hunts: u.hunts.map(h => huntView(u, h)),
           bg: live.length > 0, strands: live,
