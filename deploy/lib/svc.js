@@ -6,6 +6,7 @@ const store = require('./store');
 const hunt = require('./hunt');
 const chain = require('./chain');
 const L = require('./logic');
+const morning = require('./morning');
 
 const ADMIN_U = (process.env.ADMIN_USERNAME || 'gaucho_bro').toLowerCase().replace('@', '');
 const ADMIN_UID = Number(process.env.ADMIN_UID || 0);
@@ -143,7 +144,19 @@ function patchHunt(u, h, patch) {
   if (p.courts !== undefined) h.courts = (Array.isArray(p.courts) ? p.courts : []).map(Number).filter(n => n >= 1 && n <= 8).sort();
   if (p.cIdx !== undefined) h.cIdx = (Array.isArray(p.cIdx) ? p.cIdx : []).map(Number)
     .filter(n => Number.isInteger(n) && n >= 0 && n < (u.contacts || []).length).sort();
-  if (p.days !== undefined) {
+  if (p.daily !== undefined) {
+    const on = !!p.daily;
+    if (on && !h.daily) {
+      h.days = [morning.targetDay()];                 // дни утренней охоты ставит сам бот каждое утро
+      if (h.active && !morning.inWindow()) {          // обычная охота не должна «зависнуть» в утреннем режиме
+        h.active = false; h.actBy = 'user';
+        store.log(u, `${hunt.label(h)}: переведена в утренний режим — проснётся в ${morning.startText()}`);
+      }
+    }
+    h.daily = on;
+    if (!on) delete h.dailyRun;
+  }
+  if (p.days !== undefined && !h.daily) {
     const ok = (Array.isArray(p.days) ? p.days : []).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x));
     const today = store.isoToday(0);
     h.days = ok.filter(x => x >= today).slice(0, 3).sort();
@@ -174,6 +187,12 @@ function sanitize(u, h) {
 
 async function startHunt(u, g, h, req, src) {
   if (g.botOn === false) return { ok: false, why: 'Бот выключен владельцем' };
+  if (h.daily) {
+    // Утренняя охота стартует сама. Вручную — только пока идёт окно.
+    if (!morning.inWindow()) return { ok: false, why: `Утренний режим включается сам в ${morning.startText()} и ловит «послезавтра» до ${morning.info().end}. Для охоты прямо сейчас переключите её на «Обычную».` };
+    h.days = [morning.targetDay()];
+    h.dailyRun = L.todayISO(Date.now());
+  }
   const row = userRow(g, u.uid);
   if (row && row.blocked) return { ok: false, why: 'Доступ закрыт владельцем' };
   const lim = limits(row);
