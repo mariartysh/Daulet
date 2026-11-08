@@ -149,6 +149,23 @@ setInterval(() => {
     .catch(e => console.error('summary:', e.message));
 }, 30 * 1000).unref();
 
+// ---------- утренний режим: точный будильник ----------
+// Охоты с флагом «Каждое утро в 7:00» просыпаются в начале окна (по умолчанию 06:59).
+// Не ждём минутного пингера: сами зовём тот же обработчик, как только окно открылось.
+let morning = null;
+try { morning = require('./lib/morning'); } catch (e) { console.error('Утренний режим не загрузился:', e.message); }
+let lastMorning = '';
+setInterval(() => {
+  if (!morning || !process.env.TICK_KEY || !morning.inWindow()) return;
+  const day = new Date(Date.now() + (Number(process.env.TZ_OFFSET) || 5) * 3600e3).toISOString().slice(0, 10);
+  if (lastMorning === day) return;
+  lastMorning = day;
+  fetch(`http://127.0.0.1:${PORT}/api/tick?key=${encodeURIComponent(process.env.TICK_KEY)}&job=morning`)
+    .then(r => r.json())
+    .then(j => { if (!j || j.ok !== true) { lastMorning = ''; console.error('morning:', JSON.stringify(j)); } })
+    .catch(e => { lastMorning = ''; console.error('morning:', e.message); });
+}, 5 * 1000).unref();
+
 // Хостинг при обновлении шлёт SIGTERM: закрываемся аккуратно, эстафету поднимет пингер.
 process.on('SIGTERM', () => {
   server.close(() => process.exit(0));
