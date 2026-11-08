@@ -151,6 +151,11 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
   <div class="card">
     <h2>Когда играем</h2>
     <div>
+      <label>Как искать</label>
+      <div class="chips g2" id="daily"></div>
+      <div class="sub" id="dailyHint" style="margin-top:8px"></div>
+    </div>
+    <div id="daysBox">
       <label>Дни поиска</label>
       <div class="chips g1" id="days"></div>
       <div class="sub" id="daysHint" style="margin-top:8px"></div>
@@ -416,6 +421,13 @@ function render(){
     if(!nx.length)return toast('Хотя бы один день нужен');
     edit({days:nx});
   });
+  // Утренний режим: корты на послезавтра выходят в 07:00, бот сам просыпается к этому часу
+  const M=S.morning||{};
+  chips($('daily'),[[0,'Обычный'],[1,'☀️ Каждое утро в 7:00']],v=>!!h.daily===(v===1),v=>edit({daily:v===1}));
+  $('daysBox').style.display=h.daily?'none':'';
+  $('dailyHint').textContent=h.daily
+    ?'Каждое утро в '+(M.start||'06:59')+' бот сам включится, возьмёт день «послезавтра» и до '+(M.end||'07:06')+' будет проверять сайт чаще обычного (раз в '+(((M.paceMs||1500)/1000).toFixed(1))+' с). Потом уснёт до завтра. Время игры и фильтры ниже работают как обычно. Нужно сохранить кнопкой «Обновить данные охоты».'
+    :'Обычная охота ищет выбранные дни, пока вы её не остановите (не дольше 12 часов).';
   chips($('type'),[['any','Любой'],['indoor','Крытый'],['outdoor','Открытый']],v=>h.type===v,v=>edit({type:v,courts:[]}));
   // Если выбранного типа на сайте нет — охота будет бегать впустую, говорим об этом сразу.
   const sn=S.seen,nType=sn?(h.type==='indoor'?sn.in:h.type==='outdoor'?sn.out:sn.in+sn.out):null;
@@ -474,9 +486,12 @@ function render(){
   $('statusSub').textContent=h.booked>=h.goal&&h.booked>0?'всё поймано 🏁':'поймано кортов';
   $('perDay').textContent=h.perDay.length>1?h.perDay.map(d=>isoWord(d.iso)+' '+d.got+'/'+d.need).join(' · '):'';
   $('pbar').style.width=Math.min(100,Math.round(h.booked/Math.max(1,h.goal)*100))+'%';
-  $('toggleBtn').textContent=h.active?'Остановить':'Начать охоту';
+  const waitMorning=!!h.daily&&!h.active&&!M.now;
+  $('toggleBtn').textContent=h.active?'Остановить':(waitMorning?'Проснётся сама в '+(M.start||'06:59'):'Начать охоту');
   $('toggleBtn').classList.toggle('stop',h.active);
-  $('huntPill').textContent=h.active?'● ловлю прямо сейчас':'на паузе';
+  $('toggleBtn').disabled=waitMorning;
+  $('toggleBtn').style.opacity=waitMorning?'.55':'1';
+  $('huntPill').textContent=h.active?(h.daily?'● утренний забег идёт':'● ловлю прямо сейчас'):(h.daily?'⏰ ждёт '+(M.start||'06:59'):'на паузе');
   $('huntPill').className='pill'+(h.active?' live':'');
   $('statusCard').classList.toggle('live',h.active);
   let bg;
