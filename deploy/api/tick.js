@@ -10,6 +10,7 @@ const svc = require('../lib/svc');
 const hunt = require('../lib/hunt');
 const chain = require('../lib/chain');
 const L = require('../lib/logic');
+const morning = require('../lib/morning');
 
 // Все окна кэша вынесены в переменные окружения: если однажды понадобится
 // реакция побыстрее — поднимаете тариф базы и уменьшаете числа, код трогать не надо.
@@ -45,7 +46,7 @@ function inQuietHours() {
 }
 
 async function sweepAll() {
-  if (inQuietHours()) return { any: false, pace: 60000, quiet: true };
+  if (inQuietHours() && !morning.inWindow()) return { any: false, pace: 60000, quiet: true };   // утреннее окно сильнее ночной паузы
   const g = await store.loadGlobal(G_FRESH);
   if (g.botOn === false) { await store.setAct({ h: 0, b: 0 }); return { any: false, pace: 60000, off: true }; }
   const rows = (g.users || []).filter(x => !x.blocked);
@@ -167,6 +168,8 @@ async function anyActive(cheap) {
 
 // ---------- пингер ----------
 async function guard(req, res) {
+  // Утренний режим: в окне около 07:00 будим охоты «на послезавтра». Вне окна это ничего не стоит.
+  if (morning.inWindow()) { try { await morning.arm(); } catch (e) { console.error('morning:', e && e.message); } }
   // Одно чтение приносит и сердцебиения веток, и признак «есть ли активные охоты».
   // Раньше на это уходило два обращения, а в простое пингер зовётся круглые сутки.
   const b0 = await chain.beats().catch(() => ({}));
@@ -209,6 +212,14 @@ module.exports = async (req, res) => {
     }
     if (await anyActive()) await chain.revive(req, { confirm: false });
     return res.status(200).json({ ok: true, job: 'summary' });
+  }
+
+  if (q.job === 'morning') {
+    // Точный будильник: сервер зовёт это сам в начале окна, не дожидаясь пингера.
+    let armed = 0;
+    try { armed = await morning.arm(); } catch (e) { return res.status(200).json({ ok: false, job: 'morning', error: e.message }); }
+    if (armed) await chain.revive(req, { confirm: true });
+    return res.status(200).json({ ok: true, job: 'morning', armed, window: morning.windowText() });
   }
 
   if (q.chain === '1') {
