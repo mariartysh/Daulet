@@ -181,7 +181,7 @@ function sanitize(u, h) {
   h.reminded = {};
   h.noFitSent = 0;
   u.bo = { fails: 0, ban: 0 };
-  u.targets = null; u.svcCache = null;               // список кортов перечитываем заново
+  u.targets = null; u.svcCache = null; u.tgFail = null; u.errSince = {};               // список кортов перечитываем заново, старые сбои не в счёт
   for (const b of h.bookings || []) if (b.start < Date.now() - 3600e3) b.cancelled = true;
 }
 
