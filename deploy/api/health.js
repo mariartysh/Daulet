@@ -73,6 +73,15 @@ module.exports = async (req, res) => {
       await store.saveGlobal(g);
       out.сброс_счётчика = `готово — было ${было}, стало 0. Охоты можно запускать снова.`;
     }
+    // Выставить счётчик по цифре из панели Upstash: /api/health?key=TICK_KEY&setcmd=411000
+    const sc = String((req.query || {}).setcmd || '').replace(/\D/g, '');
+    if (full && sc) {
+      const было = store.used(g);
+      store.setCmd(g, Number(sc));
+      store.log(g, `Счётчик обращений к базе выставлен вручную: ${sc} (было ${было})`);
+      await store.saveGlobal(g);
+      out.счётчик_выставлен = `готово — было ${было}, стало ${sc}. Если охоты стояли на паузе из-за лимита, запустите их снова.`;
+    }
     const u_ = store.used(g), b_ = store.budget();
     out.команды_к_базе = {
       за_этот_месяц_оценка: u_,
@@ -80,7 +89,8 @@ module.exports = async (req, res) => {
       израсходовано: b_ ? Math.round(u_ / b_ * 100) + '%' : '—',
       бесплатный_лимит_upstash: 500000,
       состояние: store.overBudget(g) ? 'БЮДЖЕТ ИСЧЕРПАН — охоты стоят на паузе' : 'в норме',
-      сброс: 'добавьте &resetcmd=1 к этому адресу (нужен ключ)'
+      сброс: 'добавьте &resetcmd=1 к этому адресу (нужен ключ); выставить по панели Upstash: &setcmd=ЦИФРА',
+      режим: store.LOCAL ? 'память процесса: в базу пишем только изменения' : 'каждый вызов читает базу'
     };
     const b = await store.beats().catch(() => ({}));
     out.фоновый_поиск = { ветка_A: ms(b.a && b.a.at), ветка_B: ms(b.b && b.b.at) };
