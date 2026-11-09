@@ -143,7 +143,7 @@ function vBookings(u) {
   for (const { b } of act) {
     const d = L.deadlines(b.start);
     const late = Date.now() >= d.online;
-    text += `\n\n🎾 <b>${hunt.courtTitle(b, b.name)}</b> · ${L.whenText(b.start, 60)}${L.midnightNote(b.start)}\nна ${b.onName || '—'}\n${late ? `Онлайн уже поздно — только звонком, до ${L.hm(d.phone)}` : `Отменить онлайн можно до ${L.hm(d.online)}, звонком — до ${L.hm(d.phone)}`}`;
+    text += `\n\n🎾 <b>${hunt.courtTitle(b, b.name)}</b> · ${L.whenText(b.start, 60)}${L.midnightNote(b.start)}\nна ${b.onName || '—'}${b.status === 'ok' ? '\n✅ стоит на сайте' : ''}\n${late ? `Онлайн уже поздно — только звонком, до ${L.hm(d.phone)}` : `Отменить онлайн можно до ${L.hm(d.online)}, звонком — до ${L.hm(d.phone)}`}`;
     if (!late) rows.push([btn(`↩️ Отменить ${L.hm(b.start)} · ${hunt.courtTitle(b, b.name)}`, `c|${b.id}`)]);
   }
   rows.push([btn('⬅️ В меню', 'V|main')]);
