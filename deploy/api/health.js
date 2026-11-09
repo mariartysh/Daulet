@@ -21,6 +21,18 @@ module.exports = async (req, res) => {
       ADMIN_UID: Number(process.env.ADMIN_UID || 0) || 'не задан',
       APP_URL: (process.env.APP_URL || '').trim() || 'НЕ ЗАДАН'
     },
+    сервер: (() => {
+      const st = global.__chStats;
+      if (!st) return 'нет данных (запущено не через server.js)';
+      const up = Math.round((Date.now() - st.bootAt) / 1000);
+      const ago = t => t ? Math.round((Date.now() - t) / 1000) + ' с назад' : 'не было';
+      return {
+        работает_без_перезапуска: up >= 3600 ? Math.floor(up / 3600) + ' ч ' + Math.floor(up % 3600 / 60) + ' мин' : Math.floor(up / 60) + ' мин ' + (up % 60) + ' с',
+        запущен: new Date(st.bootAt).toISOString(),
+        пингер_cron_job_org: { последний_запрос: ago(st.extTick.last), запросов_с_запуска: st.extTick.count, самый_долгий_перерыв_с: st.extTick.maxGapS },
+        самопинг: { последний: ago(st.selfPing.last), удачных: st.selfPing.ok, неудачных: st.selfPing.fail, ошибка: st.selfPing.lastErr || undefined }
+      };
+    })(),
     база: store.live ? 'настроена' : 'НЕТ — данные живут в памяти и стираются при каждом запуске (отсюда «слетел пароль»)'
   };
 
