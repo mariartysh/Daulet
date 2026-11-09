@@ -224,6 +224,8 @@ select{background-image:linear-gradient(45deg,transparent 50%,var(--sub) 50%),li
       <h2>Мои брони</h2>
       <span class="pill">отмена: онлайн −5ч · звонком −3ч</span>
     </div>
+    <div class="sub" style="margin:2px 0 8px">Бот хранит номер каждой записи, поэтому проверить и отменить бронь можно отсюда — войти на сайт по номеру телефона не нужно.</div>
+    <button class="btn" id="chkBk" onclick="checkBks()" style="margin-bottom:8px">Проверить, что брони стоят на сайте</button>
     <div id="bookings"></div>
   </div>
 
@@ -460,7 +462,7 @@ function render(){
   $('huntCHint').textContent=!cl.length
     ?'Контактов пока нет — добавьте ниже, в «На кого бронируем».'
     :(cSel.length?'Эта охота бронирует только на: '+cSel.map(i=>(S.contacts[i]||{}).name||('№'+(i+1))).join(', ')
-                 :'Эта охота бронирует на любой из '+cl.length+' контактов. У каждой охоты выбор свой.');
+                 :('Эта охота бронирует на '+cl.length+' контактов по очереди: каждая новая бронь — на следующего, а корты на одно и то же время — всегда на разных. У каждой охоты выбор свой.'));
   chips($('mode'),[['auto','Бронить сразу'],['confirm','Сначала спросить']],v=>h.mode===v,v=>edit({mode:v}));
   chips($('interval'),(S.intervals||[2,3,5,7,10]).map(v=>[v,v+' с']),v=>Number(h.interval)===v,v=>edit({interval:v}));
 
@@ -521,12 +523,14 @@ function render(){
   const all=[];
   S.hunts.forEach(x=>(x.bookings||[]).forEach(b=>all.push({...b,hl:x.title||('Охота '+(S.hunts.indexOf(x)+1))})));
   all.sort((a,b)=>a.start-b.start);
+  $('chkBk').style.display=all.length?'':'none';
   $('bookings').innerHTML=all.length?all.map(b=>{
     const lo=left(b.online),lp=left(b.phone);
     return '<div class="bk">'
       +'<div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline"><span class="t">'+esc(b.title)+'</span><span style="font-weight:700;color:var(--purple)">'+(b.price?b.price+' ₸':'')+'</span></div>'
       +'<div style="font-size:15px">'+esc(b.when)+(b.midnight?' <span style="color:var(--purple);font-weight:600">🌙 это ночь</span>':'')+'</div>'
       +'<div class="sub">на '+esc(b.onName||'—')+' · '+esc(b.hl)+'</div>'
+      +'<div class="sub">'+(b.status==='ok'?'✅ стоит на сайте · проверено '+(b.chk<1?'только что':b.chk+' мин назад'):(b.tried?'❔ сайт не показал статус — отмена всё равно работает':'⏳ статус ещё не проверен'))+'</div>'
       +'<div class="chips"><span class="pill" '+(lo?'style="background:linear-gradient(135deg,var(--lime1),var(--lime2));color:var(--ink)"':'')+'>'+(lo?'онлайн-отмена ещё '+lo:'онлайн-отмена закрыта')+'</span>'
       +'<span class="pill">'+(lp?'звонком ещё '+lp:'отмена закрыта')+'</span></div>'
       +(lo?'<button class="btn danger" onclick="cancelBk(\''+b.id+'\')">Отменить бронь</button>':(lp?'<div class="sub">Онлайн уже поздно — только звонком на корты</div>':''))
@@ -696,6 +700,7 @@ async function probe(){
 }
 async function takeOffer(id){buzz('success');toast('Бронирую…');const r=await api('takeOffer',{id});buzz(r.ok?'success':'error');toast(r.ok?'Есть! Корт ваш 🎾':(r.error||'Не вышло'));refresh();}
 async function skipOffer(id){await api('skipOffer',{id});refresh();}
+async function checkBks(){const btn=$('chkBk');btn.disabled=true;const r=await api('checkBookings');btn.disabled=false;buzz(r.ok?'success':'error');toast(!r.ok?(r.error||'Не вышло'):(r.cancelled?('Брони отменили на сайте: '+r.cancelled):(r.supported===false?'Сайт не показывает статус — отмена всё равно работает':('Стоят на сайте: '+r.standing+' из '+r.total))));refresh();}
 async function cancelBk(id){if(!confirm('Точно отменить бронь?'))return;const r=await api('cancelBooking',{id});buzz(r.ok?'success':'error');toast(r.ok?'Отменил. Слот снова свободен':(r.error||'Не вышло'));refresh();}
 function left(ms){const d=ms-Date.now();if(d<=0)return null;const h=Math.floor(d/36e5),m=Math.floor(d%36e5/6e4);return h?h+'ч '+String(m).padStart(2,'0')+'м':m+' мин';}
 
