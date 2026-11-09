@@ -219,6 +219,7 @@ async function startHunt(u, g, h, req, src) {
   u.kickAt = Date.now();
   await store.saveUser(u);
   await store.setAct({ h: 1, b: 1 });          // чтобы пингер сразу знал: есть что вести
+  chain.resetGate();                           // новая охота не ждёт паузу чужой
   await chain.drop();
   const okA = await chain.spawn(req, 'a', { confirm: true });
   if (chain.STRANDS.includes('b')) await chain.spawn(req, 'b', { confirm: false, delay: 20 });
