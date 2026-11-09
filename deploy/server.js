@@ -6,6 +6,9 @@
 //
 // Зависимостей нет. Запуск: node server.js (порт берётся из переменной PORT).
 'use strict';
+// Постоянный процесс — главный хозяин состояния: держим его в памяти и пишем в Upstash только
+// изменения (см. lib/store.js). Отключить: переменная LOCAL_STATE=0.
+if (process.env.LOCAL_STATE === undefined) process.env.LOCAL_STATE = '1';
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -167,7 +170,10 @@ setInterval(() => {
 }, 5 * 1000).unref();
 
 // Хостинг при обновлении шлёт SIGTERM: закрываемся аккуратно, эстафету поднимет пингер.
+// Перед выходом дописываем в базу всё, что копилось в памяти (счётчики проверок, «уже видел»).
 process.on('SIGTERM', () => {
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(0), 5000).unref();
+  try { require('./lib/chain').stop(); } catch (e) {}
+  const done = () => process.exit(0);
+  Promise.resolve().then(() => require('./lib/store').flushAll()).catch(e => console.error('flush:', e && e.message)).then(() => server.close(done));
+  setTimeout(done, 5000).unref();
 });
