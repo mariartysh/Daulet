@@ -30,6 +30,7 @@ module.exports = async (req, res) => {
         работает_без_перезапуска: up >= 3600 ? Math.floor(up / 3600) + ' ч ' + Math.floor(up % 3600 / 60) + ' мин' : Math.floor(up / 60) + ' мин ' + (up % 60) + ' с',
         запущен: new Date(st.bootAt).toISOString(),
         пингер_cron_job_org: { последний_запрос: ago(st.extTick.last), запросов_с_запуска: st.extTick.count, самый_долгий_перерыв_с: st.extTick.maxGapS },
+        запасной_пингер: { вызовов_с_запуска: st.selfTick.count, последний: ago(st.selfTick.last), пояснение: 'сам зовёт /api/tick, только если cron-job.org молчит' },
         самопинг: { последний: ago(st.selfPing.last), удачных: st.selfPing.ok, неудачных: st.selfPing.fail, ошибка: st.selfPing.lastErr || undefined }
       };
     })(),
