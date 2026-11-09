@@ -132,5 +132,7 @@ const book = ({ phone, fullname, email, staffId, serviceId, datetime, comment },
   }, base);
 
 const cancel = (recordId, hash, base) => api(`/user/records/${recordId}/${hash}`, { method: 'DELETE' }, base);
+// Прочитать свою запись по номеру и хэшу (тот же адрес, что и для отмены): вход по телефону не нужен.
+const getRecord = (recordId, hash, base) => api(`/user/records/${recordId}/${hash}`, {}, base);
 
-module.exports = { api, batch, getStaff, getServices, getTimes, getDates, book, cancel, CID, BASES, SITE_HOST, banned, banFor, banLeft, slowFactor, pressureNow, cacheStats };
+module.exports = { api, batch, getStaff, getServices, getTimes, getDates, book, cancel, getRecord, CID, BASES, SITE_HOST, banned, banFor, banLeft, slowFactor, pressureNow, cacheStats };
