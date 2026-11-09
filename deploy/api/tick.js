@@ -45,7 +45,19 @@ function inQuietHours() {
   return from <= to ? (local >= from && local < to) : (local >= from || local < to);
 }
 
+// Проход по охотам с «затвором» темпа: чаще, чем решил темп, не пускаем — кто бы ни звал
+// (новое звено цепочки, пингер, второй вызов подряд). Пока затвор закрыт, отдаём остаток паузы.
 async function sweepAll() {
+  if (chain.isStopping()) return { any: true, pace: 5000, results: [], stopping: true };
+  const wait = chain.gate.until - Date.now();
+  if (wait > 40) return { any: chain.gate.any, pace: wait, results: [], gated: true };
+  const r = await sweepOnce();
+  chain.gate.any = !!r.any;
+  chain.gate.until = r.any ? Date.now() + r.pace : 0;     // когда охот нет — затвор открыт, свежая охота стартует сразу
+  return r;
+}
+
+async function sweepOnce() {
   if (inQuietHours() && !morning.inWindow()) return { any: false, pace: 60000, quiet: true };   // утреннее окно сильнее ночной паузы
   const g = await store.loadGlobal(G_FRESH);
   if (g.botOn === false) { await store.setAct({ h: 0, b: 0 }); return { any: false, pace: 60000, off: true }; }
@@ -61,7 +73,7 @@ async function sweepAll() {
       for (const h of u.hunts) { h.active = false; h.actBy = 'budget'; }
       store.log(u, 'Охоты остановлены: израсходован месячный бюджет обращений к базе', 1);
       await store.saveUser(u, { merge: true });
-      await hunt.sendTo(u, '⚠️ <b>Остановил охоты</b>\nМесячный счётчик обращений к базе дошёл до потолка — иначе бот ляжет целиком.\nСбросится 1-го числа. Сбросить вручную: откройте <code>/api/health?key=ВАШ_TICK_KEY&amp;resetcmd=1</code>. Потолок задаётся переменной CMD_BUDGET (0 — выключить проверку).').catch(() => {});
+      await hunt.sendTo(u, '⚠️ <b>Остановил охоты</b>\nМесячный счётчик обращений к базе дошёл до потолка — иначе бот ляжет целиком.\nСбросится 1-го числа. Если в панели Upstash цифра меньше, выставьте её: откройте <code>/api/health?key=ВАШ_TICK_KEY&amp;setcmd=ЦИФРА_С_ПАНЕЛИ</code>. Потолок задаётся переменной CMD_BUDGET (0 — выключить проверку).').catch(() => {});
     }
     await store.setAct({ h: 0, b: 0 });
     await store.saveGlobal(g);
@@ -88,9 +100,12 @@ async function sweepAll() {
     hAct += u.hunts.filter(h => h.active).length;
     bAct += hunt.allActiveBookings(u).length;
     if (changed) store.markDirty(u.uid);
-    if (important || store.dirtyFor(u.uid) > SAVE_MS) {
+    if (important) {
       u.lastTick = Date.now();
-      await store.saveUser(u, { merge: true });      // не затираем правки из панели и бота
+      await store.saveUser(u, { merge: true });      // событие (поймал, предложил, сбой) — пишем сразу; не затираем правки из панели
+    } else if (store.dirtyFor(u.uid) > SAVE_MS) {
+      u.lastTick = Date.now();
+      await store.saveUser(u, { merge: true, lazy: true });   // служебные пометки; на постоянном сервере уйдут в базу плановой записью
     }
   }
   await store.setAct({ h: hAct, b: bAct });
@@ -99,6 +114,12 @@ async function sweepAll() {
 
 // ---------- звено ветки ----------
 async function link(req, res, strand, run, delaySec) {
+  // Предохранитель: звеньев не больше нескольких в минуту. Если что-то пошло вразнос,
+  // лишние звенья молча выходят, а пингер раз в минуту поднимет ветку заново.
+  if (!chain.allowLink()) {
+    console.error(`Звено ${strand}: слишком частые запуски — пропускаю`);
+    return res.status(200).json({ ok: true, strand, throttled: true });
+  }
   const before = await chain.beats().catch(() => ({}));
   await chain.beat(strand, run);
   // Ветка A работает, B только страхует — лишних запросов к сайту не делаем.
@@ -131,9 +152,12 @@ async function link(req, res, strand, run, delaySec) {
       respawn = Date.now();
       await chain.spawn(req, 'a', { confirm: false });
     }
+    // Ждём до конца СВОЕГО окна, даже если пауза длиннее остатка. Раньше здесь был выход «пауза не влезает» —
+    // звено передавало эстафету сразу, и при паузе 30–150 с (бан, сбой сайта) звенья сыпались одно за другим.
     const gap = (strand === 'a') ? pace : WATCH_MS;
-    if (Date.now() + gap > until) break;
-    await chain.sleep(gap);
+    const left = until - Date.now();
+    if (left <= 0) break;
+    await chain.sleep(Math.min(gap, left));
   }
 
   let handed = false, neighbour = false;
@@ -169,7 +193,7 @@ async function anyActive(cheap) {
 // ---------- пингер ----------
 async function guard(req, res) {
   // Утренний режим: в окне около 07:00 будим охоты «на послезавтра». Вне окна это ничего не стоит.
-  if (morning.inWindow()) { try { await morning.arm(); } catch (e) { console.error('morning:', e && e.message); } }
+  if (morning.inWindow()) { try { if (await morning.arm()) chain.resetGate(); } catch (e) { console.error('morning:', e && e.message); } }
   // Одно чтение приносит и сердцебиения веток, и признак «есть ли активные охоты».
   // Раньше на это уходило два обращения, а в простое пингер зовётся круглые сутки.
   const b0 = await chain.beats().catch(() => ({}));
@@ -218,7 +242,7 @@ module.exports = async (req, res) => {
     // Точный будильник: сервер зовёт это сам в начале окна, не дожидаясь пингера.
     let armed = 0;
     try { armed = await morning.arm(); } catch (e) { return res.status(200).json({ ok: false, job: 'morning', error: e.message }); }
-    if (armed) await chain.revive(req, { confirm: true });
+    if (armed) { chain.resetGate(); await chain.revive(req, { confirm: true }); }
     return res.status(200).json({ ok: true, job: 'morning', armed, window: morning.windowText() });
   }
 
