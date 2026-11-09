@@ -101,6 +101,10 @@ async function serveStatic(pathname, req, res) {
   }
 }
 
+// Для /api/health: когда процесс стартовал и как часто к нему стучится внешний пингер.
+// Если «аптайм» маленький — хостинг перезапускал сервис (обновление, смена переменных, лимиты бесплатного тарифа).
+const stats = global.__chStats = { bootAt: Date.now(), extTick: { last: 0, count: 0, maxGapS: 0 }, selfPing: { last: 0, ok: 0, fail: 0, lastErr: '' } };
+
 const server = http.createServer(async (req, res) => {
   shim(res);
   let url;
@@ -110,6 +114,13 @@ const server = http.createServer(async (req, res) => {
 
   // Лёгкая проверка для хостинга: не трогает ни базу, ни сайт кортов.
   if (pathname === '/healthz') return res.status(200).send('ok');
+
+  // Внешний пингер (cron-job.org) приходит через прокси хостинга — у таких запросов есть x-forwarded-for.
+  if (pathname === '/api/tick' && req.headers['x-forwarded-for'] && !url.searchParams.get('job') && !url.searchParams.get('chain')) {
+    const e = stats.extTick, now = Date.now();
+    if (e.last) e.maxGapS = Math.max(e.maxGapS, Math.round((now - e.last) / 1000));
+    e.last = now; e.count++;
+  }
 
   if (pathname.startsWith('/api/')) {
     const handler = loadApi(pathname.slice(5));
@@ -138,6 +149,26 @@ server.listen(PORT, '0.0.0.0', () => {
   if (!(process.env.APP_URL || '').trim()) console.warn('APP_URL не задан — фоновые ветки не смогут звать сами себя');
   if (!process.env.TICK_KEY) console.warn('TICK_KEY не задан — фоновый поиск и пингер не заработают');
 });
+
+// ---------- самопинг: чтобы бесплатный хостинг не засыпал ----------
+// Бесплатный тариф Render усыпляет сервис через ~15 минут без входящих запросов, а на следующий
+// запрос показывает экран «service waking up» (на это уходит до минуты). Основной защитой служит
+// пингер cron-job.org раз в минуту, а здесь — запасная: сервис сам раз в KEEPALIVE_MIN минут стучится
+// на свой публичный адрес (через прокси хостинга, поэтому это считается входящим запросом).
+// База и сайт кортов при этом не затрагиваются: дергается только лёгкий /healthz.
+const KEEPALIVE_MIN = Number(process.env.KEEPALIVE_MIN === undefined ? 4 : process.env.KEEPALIVE_MIN);
+const SELF_URL = (process.env.APP_URL || '').trim().replace(/\/+$/, '');
+if (KEEPALIVE_MIN > 0 && /^https?:\/\//.test(SELF_URL)) {
+  const selfPing = () => {
+    const sp = stats.selfPing;
+    sp.last = Date.now();
+    fetch(SELF_URL + '/healthz', { headers: { 'user-agent': 'court-hunter-keepalive' }, signal: AbortSignal.timeout(20000) })
+      .then(r => { if (r.ok) { sp.ok++; sp.lastErr = ''; } else { sp.fail++; sp.lastErr = 'HTTP ' + r.status; } })
+      .catch(e => { sp.fail++; sp.lastErr = String((e && e.message) || e).slice(0, 80); });
+  };
+  setTimeout(selfPing, 20 * 1000).unref();
+  setInterval(selfPing, KEEPALIVE_MIN * 60 * 1000).unref();
+}
 
 // ---------- суточная сводка владельцу (раньше — cron в vercel.json) ----------
 // 04:00 UTC = 09:00 в Астане. Раз в сутки зовём тот же обработчик, что звал Vercel.
