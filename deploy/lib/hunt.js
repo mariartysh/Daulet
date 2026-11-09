@@ -18,11 +18,28 @@ const COMBO_CAP = Number(process.env.COMBO_CAP || 24);
 const HUNT_TTL = Number(process.env.HUNT_TTL_H || 12) * 3600e3;
 
 // ---------- обнаружение кортов ----------
-async function ensureTargets(u) {
-  if (u.targets && u.targets.v === CACHE_VER && Date.now() - u.targets.ts < CACHE_TTL && u.apiBase) return u.targets.list;
+// Список кортов и услуг стоит ~14 запросов. Раньше при сбое (429, сайт молчит, пустой ответ) он
+// перезапрашивался на КАЖДОЙ проверке — это подкармливало 429 и сыпало «Заминками».
+// Теперь после неудачи следующая попытка — через нарастающую паузу (15 → 30 → 60 → … → 300 с).
+const TG_BACKOFF = Number(process.env.TARGETS_BACKOFF_S || 15) * 1000;
+const TG_BACKOFF_MAX = Number(process.env.TARGETS_BACKOFF_MAX_S || 300) * 1000;
+function targetsFail(u, kind, msg, fast) {
+  const n = ((u.tgFail && u.tgFail.n) || 0) + 1;
+  const base = fast ? 2000 : TG_BACKOFF, cap = fast ? 6000 : TG_BACKOFF_MAX;
+  u.tgFail = { n, kind, msg, until: Date.now() + Math.min(cap, base * Math.pow(2, Math.min(n - 1, 6))) };
+  const e = new Error(msg); e.kind = kind; return e;
+}
+// opts.backoff — звать из фонового прохода: пока пауза не вышла, запросов не делаем.
+// opts.fast — утренний забег: паузы короткие.
+async function ensureTargets(u, opts) {
+  const o = opts || {};
+  if (u.targets && u.targets.v === CACHE_VER && Date.now() - u.targets.ts < CACHE_TTL && u.apiBase) { u.tgFail = null; return u.targets.list; }
+  if (o.backoff && u.tgFail && Date.now() < u.tgFail.until) {
+    const e = new Error(u.tgFail.msg); e.kind = u.tgFail.kind; e.soft = true; throw e;
+  }
   u.svcCache = null;
 
-  let staffRaw = null, lastErr = '';
+  let staffRaw = null, lastErr = '', ban = 0, answered = false;
   const bases = u.apiBase ? [u.apiBase, ...alt.BASES.filter(b => b !== u.apiBase)] : alt.BASES;
   for (const b of bases) {
     const j = await alt.getStaff(b).catch(e => ({ success: false, raw: e.message }));
@@ -31,23 +48,41 @@ async function ensureTargets(u) {
       staffRaw = j.data; break;
     }
     lastErr = `HTTP ${j._status} ${JSON.stringify(j.meta || j.raw || '').slice(0, 110)}`;
-    if (j._ban) lastErr += ' — ключ отклонён или сработал лимит';
+    if (j._ban) { ban = j._ban; lastErr += ' — ключ отклонён или сработал лимит'; }
+    if (j._status === 200 && j.success) answered = true;
+    if (j._ban === 429) break;                       // сайт просит не частить — другие адреса не долбим
   }
-  if (!staffRaw) throw new Error(`сайт кортов не отвечает (${lastErr}). Похоже, устарел ключ ALTEGIO_AUTH — снимите заново из DevTools`);
+  if (!staffRaw) {
+    if (ban === 429) throw targetsFail(u, 'rate', 'Сайт кортов включил ограничение по частоте (429). Бот сам сбавил темп и вернётся к выбранной частоте, как только отпустит.', o.fast);
+    if (ban) throw targetsFail(u, 'key', `Сайт отклонил ключ (${ban}). Похоже, ALTEGIO_AUTH устарел — снимите заново из DevTools и обновите, иначе брони не пройдут.`, o.fast);
+    if (answered) throw targetsFail(u, 'courts', 'Сайт ответил, но список кортов пуст. Такое бывает ночью и в техперерыв; проверю позже. Если держится весь день — проверьте COMPANY_ID и ключ.', o.fast);
+    throw targetsFail(u, 'site', `Сайт кортов не отвечает (${lastErr}). Продолжаю пробовать, но реже.`, o.fast);
+  }
 
   const list = [];
+  let svcErr = null;
   for (const x of staffRaw) {
     const name = String(x.name || '');
     if (/стенк|стена|wall|пляж|песк|beach/i.test(name)) continue;
     const id = Number(x.id);
-    const services = await servicesFor(u, id);
+    let services;
+    try { services = await servicesFor(u, id); }
+    catch (e) { svcErr = e; break; }                   // 429 или обрыв — дальше не идём, не добиваем сайт
     if (!services.length) continue;
     const hasIn = services.some(v => /крыт/i.test(v.title));
     const hasOut = services.some(v => /откр|улич/i.test(v.title));
     const indoor = hasIn && !hasOut ? true : hasOut && !hasIn ? false : !/№/.test(name);
     list.push({ staffId: id, court: L.parseCourt(name).court, indoor, name, services });
   }
-  if (!list.length) throw new Error('сайт ответил, но кортов с услугами нет — проверьте COMPANY_ID и ключ');
+  if (svcErr) {                                       // неполный список не запоминаем: лучше подождать и собрать целиком
+    const k = svcErr.ban === 429 ? 'rate' : svcErr.ban ? 'key' : 'site';
+    throw targetsFail(u, k, k === 'rate'
+      ? 'Сайт кортов включил ограничение по частоте (429). Бот сам сбавил темп и вернётся к выбранной частоте, как только отпустит.'
+      : k === 'key' ? `Сайт отклонил ключ (${svcErr.ban}). Похоже, ALTEGIO_AUTH устарел — снимите заново из DevTools и обновите, иначе брони не пройдут.`
+        : 'Сайт кортов не отдал список услуг. Продолжаю пробовать, но реже.', o.fast);
+  }
+  if (!list.length) throw targetsFail(u, 'courts', 'Сайт ответил, но кортов с услугами не отдал. Такое бывает ночью и в техперерыв; проверю позже. Если держится весь день — проверьте COMPANY_ID и ключ.', o.fast);
+  u.tgFail = null;
   u.targets = { ts: Date.now(), v: CACHE_VER, list };
   const inC = list.filter(x => x.indoor === true).length, outC = list.filter(x => x.indoor === false).length;
   log(u, `Кортов на сайте: ${list.length} (крытых ${inC}, открытых ${outC})`);
@@ -58,14 +93,16 @@ async function servicesFor(u, staffId) {
   u.svcCache = u.svcCache && Date.now() - u.svcCache.ts < CACHE_TTL ? u.svcCache : { ts: Date.now(), byStaff: {} };
   const key = String(staffId || 0);
   if (u.svcCache.byStaff[key]) return u.svcCache.byStaff[key];
-  const j = await alt.getServices(staffId || 0, u.apiBase);
+  const j = await alt.getServices(staffId || 0, u.apiBase).catch(e => ({ success: false, _status: 0, raw: e.message }));
+  // Ответ 429/401/403 или обрыв — это НЕ «услуг нет»: раньше пустота запоминалась, и бот считал, что кортов нет.
+  if (j._ban || j._status === 0) { const e = new Error('услуги не получены'); e.ban = j._ban || 0; throw e; }
   const raw = (j.data && (j.data.services || j.data)) || [];
   const list = (Array.isArray(raw) ? raw : []).map(x => ({
     id: Number(x.id), title: x.title || '',
     len: Number(x.session_length || x.seance_length || x.duration || 0) / 60 || null,
     price: x.price_min || x.price_max || null
   }));
-  u.svcCache.byStaff[key] = list;
+  if (j.success) u.svcCache.byStaff[key] = list;      // пустой ответ с ошибкой не кэшируем
   return list;
 }
 
@@ -105,33 +142,41 @@ function pace(u, h) {
   const quick = M.fast(h);
   const base = quick ? M.PACE_MS : Math.max(1, Math.min(60, Number((h && h.interval) || 3))) * 1000;
   if (alt.banned()) return Math.max(20000, alt.banLeft());
+  if (u.tgFail && u.tgFail.until > Date.now()) return Math.max(base, u.tgFail.until - Date.now());   // пауза после сбоя списка кортов
   const f = (u.bo && u.bo.fails) || 0;
   // Окно короткое: при сбоях сайта ждём не 30–60 с, а всего 5 с.
   const raw = quick ? (f >= 3 ? Math.max(base, 5000) : base) : (f >= 6 ? 60000 : f >= 3 ? 30000 : base);
   return Math.round(raw * alt.slowFactor());   // сайт нервничает — сами сбавляем, не дожидаясь бана
 }
 
+const MSG = {
+  rate: 'Сайт включил ограничение по частоте (429). Бот сам сбавил темп и вернётся к выбранной частоте, как только отпустит.',
+  key: c => `Сайт отклонил ключ (${c}). Похоже, ALTEGIO_AUTH устарел — обновите его, иначе брони не пройдут.`,
+  site: 'Сайт кортов не отвечает. Продолжаю пробовать, но реже.'
+};
+
 async function noteResult(u, h, r) {
   u.bo = u.bo || { fails: 0, ban: 0 };
   if (r && r.apiOk) {
     if (u.bo.fails >= 3) log(u, 'Сайт снова отвечает — вернулся к обычной частоте');
     u.bo.fails = 0;
+    errClear(u);                                  // сайт ответил — всё, что тянулось, прошло само
     return;
   }
+  if (r && r.soft) return;                        // идёт пауза после сбоя, запросов не было
   if (!r || (!r.apiFail && !r.error)) return;
   u.bo.fails++;
   if (r.ban) {
-    u.bo.ban = Date.now();
-    log(u, `Сайт ответил ${r.ban} — сработал лимит или ключ не принят, притормозил`, 1);
-    await notifyError(u, r.ban === 429
-      ? 'Сайт включил ограничение по частоте (429). Автоматически сбавил темп и продолжаю — как отпустит, вернусь к выбранной частоте.'
-      : `Сайт отклонил ключ (${r.ban}). Похоже, ALTEGIO_AUTH устарел — обновите его, иначе брони не пройдут.`, true);
+    const now = Date.now();
+    u.bo.ban = now;
+    // Журнал и без того пухнет: пишем про бан не чаще раза в 5 минут
+    if (now - (u.bo.logAt || 0) > 300e3) { u.bo.logAt = now; log(u, `Сайт ответил ${r.ban} — сработал лимит или ключ не принят, притормозил`, 1); }
+    await notifyError(u, r.ban === 429 ? MSG.rate : MSG.key(r.ban), r.ban !== 429, r.ban === 429 ? 'rate' : 'key');
     return;
   }
-  if (u.bo.fails === 3) {
-    log(u, 'Сайт кортов не отвечает — притормозил до 30 с', 1);
-    await notifyError(u, 'Сайт кортов не отвечает. Продолжаю пробовать, пока реже (раз в 30 с).');
-  }
+  if (r.error) return;                            // про сбой списка кортов уже сказал sweep
+  if (u.bo.fails === 3) log(u, 'Сайт кортов не отвечает — притормозил до 30 с', 1);
+  if (u.bo.fails >= 3) await notifyError(u, MSG.site, false, 'site');
   if (u.bo.fails === 6) log(u, 'Сайт всё ещё молчит — проверяю раз в 60 с', 1);
 }
 
@@ -208,8 +253,17 @@ async function sweep(u, h) {
   if (leftSlots(h) <= 0) return finishHunt(u, h);
 
   let targets;
-  try { targets = await ensureTargets(u); }
-  catch (e) { h.stats.errors++; log(u, 'Сбой: ' + e.message, 1); await notifyError(u, e.message); return { error: e.message }; }
+  try { targets = await ensureTargets(u, { backoff: true, fast: M.fast(h) }); }
+  catch (e) {
+    if (e.soft) {                                  // пауза после недавнего сбоя: запросов нет, журнал не засоряем
+      await notifyError(u, e.message, false, e.kind);
+      return { error: e.message, soft: true, kind: e.kind };
+    }
+    h.stats.errors++; log(u, 'Сбой: ' + e.message, 1);
+    await notifyError(u, e.message, e.kind === 'key', e.kind || 'other');
+    return { error: e.message, kind: e.kind };
+  }
+  if (u.errSince) delete u.errSince.courts;        // список кортов получен — «кортов нет» закончилось
 
   const courts = targets.filter(m => L.courtOk(h, m));
   if (!courts.length) {
@@ -282,7 +336,10 @@ async function sweep(u, h) {
   }
   if (!apiOk && apiFail) {
     h.stats.errors++;
-    log(u, `Расписание не отдалось ни по одному корту (${apiFail} попыток)${ban ? ` — сайт ответил ${ban}` : ' — вероятно, устарел ключ'}`, 1);
+    if (Date.now() - (h.failLogAt || 0) > 300e3) {      // не чаще раза в 5 минут — иначе журнал и база забиваются одним и тем же
+      h.failLogAt = Date.now();
+      log(u, `Расписание не отдалось ни по одному корту (${apiFail} попыток)${ban ? ` — сайт ответил ${ban}` : ' — вероятно, устарел ключ'}`, 1);
+    }
   }
 
   // ближе к началу — раньше; так первым делом забираем то, что скоро уведут
@@ -387,7 +444,7 @@ async function doBook(u, h, staffId, serviceId, startMs, rawDatetime) {
     else h.seen[L.slotKey(staffId, startMs)] = Date.now();
     const why = busy ? 'этот час уже заняли' : (msg || JSON.stringify(j.meta || j.data || '')).slice(0, 160);
     log(u, `Бронь не прошла (${title}, ${L.whenText(startMs, 60)}): ${why}`, busy ? 0 : 1);
-    if (!busy) await notifyError(u, `Бронь не прошла: ${title}, ${L.whenText(startMs, 60)}\n${why}`, !!j._ban);
+    if (!busy) await notifyError(u, `Бронь не прошла: ${title}, ${L.whenText(startMs, 60)}\n${why}`, !!j._ban, 'book');
     return { ok: false, why: busy ? 'Не успели — этот час уже заняли' : why };
   }
 
@@ -490,11 +547,41 @@ async function reminders(u) {
   }
 }
 
-async function notifyError(u, msg, toAdmin) {
+// «Заминка» — только если беда не проходит сама. Раньше сообщение уходило на первом же сбое и
+// повторялось каждые 30 минут, в том числе по ночам. Теперь:
+//   · after — сколько беда должна тянуться НЕПРЕРЫВНО (любой успешный ответ сайта сбрасывает отсчёт);
+//   · every — не чаще раза в столько;
+//   · ночью (по умолчанию 23:00–08:00) молчим, кроме неудачной брони;
+//   · неудачная бронь — единственное, что приходит сразу: из-за неё можно остаться без корта.
+const NOTIFY = {
+  rate: { after: 30 * 60e3, every: 6 * 3600e3 },
+  site: { after: 15 * 60e3, every: 6 * 3600e3 },
+  key: { after: 10 * 60e3, every: 6 * 3600e3 },
+  courts: { after: 30 * 60e3, every: 12 * 3600e3 },
+  other: { after: 15 * 60e3, every: 6 * 3600e3 },
+  book: { after: 0, every: 10 * 60e3, night: true }
+};
+function notifyQuiet(now) {
+  const q = String(process.env.NOTIFY_QUIET || '23-8').trim();
+  if (/^(off|no|0|нет)$/i.test(q)) return false;
+  const m = q.match(/^(\d{1,2})\s*[-–:]\s*(\d{1,2})$/);
+  if (!m) return false;
+  const from = Number(m[1]), to = Number(m[2]);
+  const hr = new Date(now + (Number(process.env.TZ_OFFSET) || 5) * 3600e3).getUTCHours();
+  return from > to ? (hr >= from || hr < to) : (hr >= from && hr < to);
+}
+const errClear = u => { if (u.errSince) u.errSince = {}; };
+async function notifyError(u, msg, toAdmin, kind) {
   const now = Date.now();
-  if (u.lastErrPing && now - u.lastErrPing < 30 * 60e3) return;
-  u.lastErrPing = now;
-  await sendTo(u, `😖 <b>Заминка</b>\n${String(msg).slice(0, 500)}`);
+  const k = NOTIFY[kind] ? kind : 'other', rule = NOTIFY[k];
+  u.errSince = u.errSince || {}; u.errSent = u.errSent || {};
+  if (!u.errSince[k]) u.errSince[k] = now;
+  if (now - u.errSince[k] < rule.after) return;             // может пройти само — не тревожим
+  if (!rule.night && notifyQuiet(now)) return;              // ночью не будим
+  if (u.errSent[k] && now - u.errSent[k] < rule.every) return;
+  u.errSent[k] = now;
+  const mins = Math.round((now - u.errSince[k]) / 60e3);
+  await sendTo(u, `😖 <b>Заминка</b>\n${String(msg).slice(0, 500)}${mins >= 5 ? `\nТянется уже около ${mins} мин.` : ''}`);
   if (toAdmin) await alertAdmin(u, `⚠️ <b>${who(u)}</b>: ${String(msg).slice(0, 300)}`);
 }
 
