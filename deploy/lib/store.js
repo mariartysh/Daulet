@@ -13,6 +13,23 @@ const OLD = 'autobook:state';
 const live = !!(URL_ && TOK);
 let mem = { g: null, u: {}, hb: {}, act: '' };
 
+// ---------- режим «один долгоживущий процесс» (Render и подобные) ----------
+// Постоянный сервер — единственный, кто пишет в базу, поэтому его память и есть главная копия.
+// Состояние читаем из базы один раз при старте, а пишем только изменения и не по каждому чиху:
+//   · правки человека (панель, бот) — через SOON_MS (несколько секунд, склеиваются в одну запись);
+//   · служебное (счётчик проверок, «уже видел») — раз в LAZY_MS или при остановке сервера;
+//   · сердцебиения веток и ключ активности живут только в памяти — в базу не ходят вовсе.
+// Раньше простой сервера стоил ~1400 команд в сутки, а охота — до 30 тысяч.
+// server.js включает режим сам (LOCAL_STATE=1). На Vercel режим выключен: там каждый вызов — новый процесс.
+const LOCAL = live && /^(1|true|on|yes|да)$/i.test(String(process.env.LOCAL_STATE || ''));
+const SOON_MS = Number(process.env.SAVE_SOON_MS || 3000);
+const LAZY_MS = Number(process.env.SAVE_LAZY_MS || 10 * 60e3);
+// Предохранитель: сколько команд в минуту вообще можно отправить в базу. В норме их единицы;
+// если какая-то ошибка запустит бесконечный цикл, он упрётся в этот потолок, а не сожжёт месячный лимит.
+const FUSE_MIN = Number(process.env.CMD_FUSE_PER_MIN || 100);
+let dG = false, timer = null, nextAt = 0, flushing = null, fuseWin = [], fuseWarn = 0;
+const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+
 // ---------- экономия команд ----------
 // Один вызов функции живёт до минуты и раньше дёргал базу на каждом шаге цикла.
 // Теперь свежие данные держим в памяти вызова, пишем только изменившееся,
@@ -28,10 +45,20 @@ let pend = 0;                                // посчитано, но ещё 
 // Теперь остаток копится в памяти и уходит в базу либо вместе с другой правкой (бесплатно),
 // либо раз в CMD_FOLD команд.
 const FOLD_MIN = Number(process.env.CMD_FOLD || 300);
-const BUDGET = Number(process.env.CMD_BUDGET || 440000);
+const BUDGET = Number(process.env.CMD_BUDGET || 470000);   // бесплатный Upstash — 500 тысяч в месяц
 const fresh = (at, maxAge) => !!(maxAge && at && Date.now() - at < maxAge);
 
 async function cmd(arr) {
+  if (LOCAL) {
+    // Не больше FUSE_MIN команд за скользящую минуту: лишние ждут. Нормальной работе это не мешает.
+    for (;;) {
+      const now = Date.now();
+      while (fuseWin.length && now - fuseWin[0] > 60e3) fuseWin.shift();
+      if (fuseWin.length < FUSE_MIN) { fuseWin.push(now); break; }
+      if (now - fuseWarn > 60e3) { fuseWarn = now; console.error(`Предохранитель базы: больше ${FUSE_MIN} команд в минуту — торможу`); }
+      await sleepMs(Math.max(200, 60e3 - (now - fuseWin[0])));
+    }
+  }
   cnt++;
   const r = await fetch(URL_, {
     method: 'POST',
@@ -107,12 +134,26 @@ function defUser(uid, chat) {
 const month = () => new Date().toISOString().slice(0, 7);
 function bump() { pend += Math.max(0, cnt - folded); folded = cnt; }
 // force — прибавить остаток обязательно (зовём в момент, когда база и так пишется)
+// Однократная калибровка по панели Upstash: 9.11.2026 в 14:33 там было 411 тысяч, а наш
+// счёт расходился с реальным. Дальше считаем сами и точно (каждая команда проходит через cmd()).
+const CAL = { v: 2, m: '2026-11', n: 412000 };
+function calib(g) {
+  if (!g) return g;
+  const c = g.cmd;
+  if (c && c.v === CAL.v) return g;
+  const fresh = !c && !(g.users && g.users.length);        // совсем новая база (например, новый аккаунт Upstash): считать с нуля
+  g.cmd = fresh ? { m: month(), n: 0, v: CAL.v }
+    : month() === CAL.m ? { m: CAL.m, n: CAL.n, v: CAL.v } : { m: month(), n: c && c.m === month() ? c.n : 0, v: CAL.v };
+  pend = 0; folded = cnt;                       // команды, посчитанные до калибровки, уже вошли в цифру с панели
+  if (LOCAL) { dG = true; plan(SOON_MS); }      // запомнить новую базу счёта
+  return g;
+}
 function fold(g, force) {
   bump();
   // Раньше у свежего объекта (ещё без поля cmd) остаток просто выбрасывался —
   // это и был один из источников недосчёта.
-  if (!g.cmd) g.cmd = { m: month(), n: 0 };
-  if (g.cmd.m !== month()) { g.cmd = { m: month(), n: 0 }; pend = 0; return g; }   // новый месяц — с нуля
+  if (!g.cmd) g.cmd = { m: month(), n: 0, v: CAL.v };
+  if (g.cmd.m !== month()) { g.cmd = { m: month(), n: 0, v: CAL.v }; pend = 0; return g; }   // новый месяц — с нуля
   if (force || pend >= FOLD_MIN) { g.cmd.n += pend; pend = 0; }
   return g;
 }
@@ -120,7 +161,9 @@ const used = g => (g && g.cmd && g.cmd.m === month() ? g.cmd.n : 0) + pend + Mat
 const budget = () => BUDGET;
 const overBudget = g => BUDGET > 0 && used(g) > BUDGET;
 // Обнулить счётчик месяца (аварийно, из /api/health?key=…&resetcmd=1)
-function resetCmd(g) { g.cmd = { m: month(), n: 0 }; pend = 0; folded = cnt; return g; }
+function resetCmd(g) { g.cmd = { m: month(), n: 0, v: CAL.v }; pend = 0; folded = cnt; return g; }
+// Выставить счётчик по цифре из панели Upstash (/api/health?key=…&setcmd=411000)
+function setCmd(g, n) { g.cmd = { m: month(), n: Math.max(0, Math.round(Number(n) || 0)), v: CAL.v }; pend = 0; folded = cnt; return g; }
 
 // Сбросить накопленный остаток в базу ПЕРЕД тем, как вызов функции умрёт.
 // Без этого счётчик систематически врал в меньшую сторону: звено фонового поиска живёт
@@ -131,6 +174,7 @@ function resetCmd(g) { g.cmd = { m: month(), n: 0 }; pend = 0; folded = cnt; ret
 const FLUSH_MIN = Number(process.env.CMD_FLUSH || 3);
 async function flushCmd() {
   bump();
+  if (LOCAL) { if (cG && pend >= FLUSH_MIN) { dG = true; plan(LAZY_MS); } return false; }   // счётчик уйдёт с ближайшей плановой записью
   if (pend < FLUSH_MIN || !cG) return false;
   fold(cG, true);
   await saveGlobal(cG).catch(() => {});
@@ -140,8 +184,8 @@ async function flushCmd() {
 // ---------- глобальное ----------
 // maxAge — сколько миллисекунд можно отдавать копию из памяти вызова (0 = всегда читать базу)
 async function loadGlobal(maxAge) {
-  if (cG && fresh(cGAt, maxAge)) return cG;
-  const g = await readGlobal();
+  if (cG && (LOCAL || fresh(cGAt, maxAge))) return cG;    // постоянный сервер: память — главная копия
+  const g = calib(await readGlobal());
   cG = g; cGAt = Date.now();
   return g;
 }
@@ -149,7 +193,7 @@ async function loadGlobal(maxAge) {
 async function readGlobal() {
   if (!live) { mem.g = mem.g || defGlobal(); return mem.g; }
   const raw = await cmd(['GET', G]);
-  if (raw) { try { return Object.assign(defGlobal(), JSON.parse(raw)); } catch {} }
+  if (raw) { try { const g0 = Object.assign(defGlobal(), JSON.parse(raw)); wG = raw; return g0; } catch {} }
   const g = defGlobal();
   const old = await cmd(['GET', OLD]).catch(() => null);
   if (old) {
@@ -190,11 +234,12 @@ async function readGlobal() {
   return g;
 }
 
-async function saveGlobal(g) {
+async function saveGlobal(g, opts) {
   g.log = (g.log || []).slice(0, 80);
   fold(g);
   cG = g; cGAt = Date.now();
   if (!live) { mem.g = g; return; }
+  if (LOCAL) { dG = true; plan(opts && opts.lazy ? LAZY_MS : SOON_MS); return; }
   let json = JSON.stringify(g);
   if (json === wG) return;                   // ничего не изменилось — не тратим команду
   fold(g, true);                             // раз уж пишем — заодно учтём остаток счётчика
@@ -236,7 +281,7 @@ function fixUser(u) {
 async function loadUser(uid, maxAge) {
   if (!uid) return null;
   if (!live) { mem.u[uid] = mem.u[uid] ? fixUser(mem.u[uid]) : defUser(uid); return mem.u[uid]; }
-  if (cU[uid] && fresh(cUAt, maxAge)) return cU[uid];
+  if (cU[uid] && (LOCAL || fresh(cUAt, maxAge))) return cU[uid];
   const raw = await cmd(['GET', UK(uid)]);
   if (!raw) return null;
   let u; try { u = fixUser(JSON.parse(raw)); } catch { u = defUser(uid); }
@@ -248,7 +293,8 @@ async function loadUser(uid, maxAge) {
 // Панель на каждый опрос читала глобальное состояние, профиль и сердцебиения —
 // три отдельных чтения. MGET забирает всё это одной командой.
 async function loadBundle(uid) {
-  if (!live || !uid) {
+  if (!live || !uid || LOCAL) {
+    // постоянный сервер: всё уже в памяти, в базу идём только при первом обращении после старта
     return { g: await loadGlobal(), u: uid ? await loadUser(uid) : null, beats: await beats() };
   }
   const r = await cmd(['MGET', G, UK(uid), HB('a'), HB('b'), ACT]);
@@ -257,6 +303,7 @@ async function loadBundle(uid) {
   let g;
   if (r && r[0]) { try { g = Object.assign(defGlobal(), JSON.parse(r[0])); } catch {} }
   if (!g) g = await readGlobal();                 // пусто или битое — обычный путь с миграцией
+  g = calib(g);
   cG = g; cGAt = Date.now();
 
   let u = null;
@@ -329,7 +376,7 @@ async function saveUser(u, opts) {
     h.offers = (h.offers || []).filter(o => o.start > now + 5 * 60e3).slice(0, 12);
     h.bookings = (h.bookings || []).filter(b => b.start > now - 7 * 86400e3).slice(-60);
   }
-  if (live && opts && opts.merge) {
+  if (live && !LOCAL && opts && opts.merge) {
     const raw = await cmd(['GET', UK(u.uid)]).catch(() => null);
     if (raw && raw !== wU[u.uid]) {                 // кто-то писал после нас — сливаем, а не затираем
       try { mergeUser(fixUser(JSON.parse(raw)), u); } catch (e) {}
@@ -338,17 +385,61 @@ async function saveUser(u, opts) {
   u.log = (u.log || []).slice(0, 120);
   cU[u.uid] = u;
   if (!live) { mem.u[u.uid] = u; return; }
+  if (LOCAL) {
+    // lazy — служебная пометка поиска: пишем раз в LAZY_MS; без неё — правка человека, через SOON_MS
+    if (!dU[u.uid]) dU[u.uid] = Date.now();
+    plan(opts && opts.lazy ? LAZY_MS : SOON_MS);
+    return;
+  }
+  await writeUser(u);
+}
+
+async function writeUser(u) {
   const json = JSON.stringify(u);
-  if (json === wU[u.uid]) { dU[u.uid] = 0; return; }   // нечего писать
+  if (json === wU[u.uid]) { dU[u.uid] = 0; return false; }   // нечего писать
   await cmd(['SET', UK(u.uid), json]);
   wU[u.uid] = json; dU[u.uid] = 0;
+  return true;
+}
+
+// ---------- плановая запись (только постоянный сервер) ----------
+// Ставим таймер не позже, чем через ms; если уже стоит более ранний — оставляем его.
+function plan(ms) {
+  if (!LOCAL) return;
+  const t = Date.now() + ms;
+  if (timer && nextAt <= t) return;
+  if (timer) clearTimeout(timer);
+  nextAt = t;
+  timer = setTimeout(() => { timer = null; nextAt = 0; flushAll().catch(e => console.error('flush:', e && e.message)); }, ms);
+  if (timer.unref) timer.unref();
+}
+
+// Записать в базу всё, что изменилось (звать при остановке сервера). Одновременно идёт одна запись.
+async function flushAll() {
+  if (!LOCAL) return false;
+  if (flushing) { await flushing.catch(() => {}); }
+  flushing = (async () => {
+    let any = false;
+    for (const uid of Object.keys(dU)) {
+      if (!dU[uid] || !cU[uid]) continue;
+      if (await writeUser(cU[uid])) any = true;
+    }
+    if (dG && cG) {
+      dG = false;
+      bump(); fold(cG, true);
+      const json = JSON.stringify(cG);
+      if (json !== wG) { await cmd(['SET', G, json]); wG = json; any = true; }
+    }
+    return any;
+  })();
+  try { return await flushing; } finally { flushing = null; }
 }
 
 async function loadUsers(list, maxAge) {
   const ids = (list || []).map(x => x.uid || x).filter(Boolean);
   if (!ids.length) return [];
   if (!live) return ids.map(id => mem.u[id]).filter(Boolean).map(fixUser);
-  const need = ids.filter(id => !(cU[id] && fresh(cUAt, maxAge)));
+  const need = ids.filter(id => !(cU[id] && (LOCAL || fresh(cUAt, maxAge))));
   if (need.length) {
     const r = await cmd(['MGET', ...need.map(UK)]);
     (r || []).forEach((raw, i) => {
@@ -377,7 +468,7 @@ function log(target, m, warn) {
 // ---------- сердцебиение фоновых веток ----------
 const BEAT_EVERY = Number(process.env.BEAT_EVERY_MS || 20000);
 async function setBeat(k, run, ttlSec) {
-  if (!live) { mem.hb[k] = { at: Date.now(), run }; return; }
+  if (!live || LOCAL) { mem.hb[k] = { at: Date.now(), run }; return; }   // постоянный сервер: ветки видят друг друга в памяти
   const key = k + ':' + run;
   if (lastBeat[key] && Date.now() - lastBeat[key] < BEAT_EVERY) return;   // ветка считается живой 45 с — чаще отмечаться незачем
   lastBeat[key] = Date.now();
@@ -390,32 +481,32 @@ async function setAct(v) {
   const s = JSON.stringify({ h: (v && v.h) | 0, b: (v && v.b) | 0 });
   if (s === lastAct) return;
   lastAct = s;
-  if (!live) { mem.act = s; return; }
+  if (!live || LOCAL) { mem.act = s; return; }
   await cmd(['SET', ACT, s]);
 }
 async function getAct() {
   try {
-    const r = live ? await cmd(['GET', ACT]) : mem.act;
+    const r = live && !LOCAL ? await cmd(['GET', ACT]) : mem.act;
     return r ? JSON.parse(r) : null;
   } catch { return null; }
 }
 // MGET нескольких ключей стоит РОВНО ОДНУ команду, поэтому забираем заодно и ch:act:
 // пингеру больше не нужно отдельное чтение «есть ли активные охоты».
 async function beats() {
-  if (!live) return { a: mem.hb.a || null, b: mem.hb.b || null, act: mem.act ? JSON.parse(mem.act) : null };
+  if (!live || LOCAL) return { a: mem.hb.a || null, b: mem.hb.b || null, act: mem.act ? JSON.parse(mem.act) : null };
   const r = await cmd(['MGET', HB('a'), HB('b'), ACT]);
   const parse = x => { try { return x ? JSON.parse(x) : null; } catch { return null; } };
   return { a: parse(r && r[0]), b: parse(r && r[1]), act: parse(r && r[2]) };
 }
 async function clearBeats() {
   mem.hb = {}; lastBeat = {};
-  if (!live) return;
+  if (!live || LOCAL) return;
   await cmd(['DEL', HB('a'), HB('b')]);
 }
 
 module.exports = {
-  live, IVS, DEF_IV, MAX_HUNTS, MAX_CONTACTS, newId, newHunt, isoToday,
+  live, LOCAL, IVS, DEF_IV, MAX_HUNTS, MAX_CONTACTS, newId, newHunt, isoToday,
   loadGlobal, saveGlobal, loadUser, loadOrCreate, loadUsers, saveUser, dropUser,
-  markDirty, dirtyFor, setAct, getAct, loadBundle, used, budget, overBudget, fold, resetCmd, flushCmd,
+  markDirty, dirtyFor, setAct, getAct, loadBundle, used, budget, overBudget, fold, resetCmd, setCmd, flushCmd, flushAll,
   log, setBeat, beats, clearBeats
 };
