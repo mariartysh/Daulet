@@ -410,13 +410,23 @@ function huntContacts(u, h) {
   return pick.filter(c => c && c.name && c.phone);
 }
 
+// Каждую новую бронь оформляем на «следующего» человека из книги: по кругу, а не всё на первого.
+// Порядок выбора: 1) не тот, кто уже записан на это же время; 2) у кого меньше всего действующих броней;
+// 3) кого дольше всего не использовали; 4) по порядку в книге.
 function contactFor(u, h, startMs) {
   const list = huntContacts(u, h);
   if (!list.length) return null;
-  const sameTime = activeBookings(h).filter(b => b.start === startMs).length;
-  const used = new Set(activeBookings(h).filter(b => b.start === startMs).map(b => String(b.phone || '')));
-  const free = list.filter(c => !used.has(c.phone));
-  return (free[0] || list[Math.min(sameTime, list.length - 1)] || list[0]);
+  const act = allActiveBookings(u).map(x => x.b);
+  const sameTime = new Set(act.filter(b => b.start === startMs).map(b => String(b.phone || '')));
+  const cnt = {}, last = {};
+  for (const b of act) cnt[b.phone] = (cnt[b.phone] || 0) + 1;
+  for (const x of u.hunts || []) for (const b of x.bookings || []) last[b.phone] = Math.max(last[b.phone] || 0, b.createdAt || 0);
+  const rank = c => [sameTime.has(c.phone) ? 1 : 0, cnt[c.phone] || 0, last[c.phone] || 0, list.indexOf(c)];
+  return list.slice().sort((p, q) => {
+    const a = rank(p), b = rank(q);
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
+    return 0;
+  })[0];
 }
 
 // ---------- бронирование (одна запись = один час) ----------
@@ -487,6 +497,7 @@ async function doBook(u, h, staffId, serviceId, startMs, rawDatetime) {
   b.notified = sent.ok > 0;
   if (!b.notified) b.notify = msg;
   await alertAdmin(u, `🎯 <b>${who(u)}</b> поймал корт\n${title} · ${L.whenText(startMs, 60)} · на ${c.name}`);
+  try { await checkOne(u, b, true); } catch (e) {}          // сразу убеждаемся, что запись реально стоит на сайте
   return { ok: true, booking: b };
 }
 
@@ -526,9 +537,66 @@ async function doCancel(u, bookingId) {
   return { ok: true, b, h };
 }
 
+// ---------- проверка: стоит ли бронь на сайте ----------
+// Запись Altegio читается по номеру и хэшу (как и отмена) — вход по телефону не нужен, поэтому
+// статус и отмена работают для любой брони, на какое бы имя и номер она ни была оформлена.
+// Если администрация отменила запись, бот скажет об этом сразу, а не в день игры.
+const REC_EVERY = Number(process.env.REC_CHECK_MIN || 10) * 60e3;
+const recOf = j => (j && j.data && !Array.isArray(j.data) ? j.data : (Array.isArray(j && j.data) ? j.data[0] : null)) || null;
+
+async function venueCancelled(u, b) {
+  b.cancelled = true; b.byVenue = true; b.status = 'cancelled'; b.cancelledAt = Date.now();
+  log(u, `Бронь отменили на сайте: ${courtTitle(b, b.name)}, ${L.whenText(b.start, 60)} (на ${b.onName || '—'})`, 1);
+  await sendTo(u, `⚠️ <b>Бронь отменили на сайте</b>\n${courtTitle(b, b.name)} · ${L.whenText(b.start, 60)}\nБыла записана на: ${b.onName || '—'}.\nЕсли корт нужен — включите охоту заново: поймаю этот час снова, если он свободен.`);
+  await alertAdmin(u, `⚠️ <b>${who(u)}</b>: бронь отменили на сайте — ${courtTitle(b, b.name)} · ${L.whenText(b.start, 60)}`);
+}
+
+// Один запрос по одной брони. Возвращает true, если выяснилось, что её отменили.
+async function checkOne(u, b, force) {
+  if (!b.recordId || !b.hash || alt.banned()) return false;
+  const now = Date.now();
+  if (!force && u.recApi === 'no') return false;
+  b.chkAt = now;
+  const j = await alt.getRecord(b.recordId, b.hash, u.apiBase).catch(e => ({ success: false, _status: 0, raw: e.message }));
+  if (j._ban) return false;
+  const rec = recOf(j);
+  if (j.success && rec && typeof rec === 'object' && (rec.id || rec.record_id || rec.datetime || rec.deleted !== undefined)) {
+    u.recApi = 'ok'; u.recFail = 0;
+    if (rec.deleted === true || rec.deleted === 1 || rec.deleted === '1') { await venueCancelled(u, b); return true; }
+    b.status = 'ok'; b.okAt = now;
+    return false;
+  }
+  if ((j._status === 404 || j._status === 410) && u.recApi === 'ok') { await venueCancelled(u, b); return true; }
+  if (j._status === 0 || j._status >= 500) return false;      // сайт временно не отвечает — не вывод
+  // Адрес не отдаёт запись (или формат неожиданный). После трёх неудач подряд перестаём спрашивать.
+  if (!b.status) b.status = 'unknown';
+  u.recFail = (u.recFail || 0) + 1;
+  if (u.recFail >= 3 && u.recApi !== 'ok') {
+    u.recApi = 'no';
+    log(u, 'Сайт не показывает статус записей — проверку отключил. Отмена по номеру записи работает как раньше.', 1);
+  }
+  return false;
+}
+
+async function checkBookings(u, opts) {
+  const o = opts || {};
+  const now = Date.now();
+  let cancelled = 0;
+  for (const { b } of allActiveBookings(u)) {
+    if (!b.recordId || !b.hash) continue;
+    if (b.start < now - 30 * 60e3) continue;                                   // игра уже началась
+    if (!o.force && now - (b.chkAt || 0) < REC_EVERY) continue;
+    if (alt.banned()) break;
+    if (await checkOne(u, b, o.force)) cancelled++;
+  }
+  return cancelled;
+}
+
 // ---------- напоминания ----------
 async function reminders(u) {
   const now = Date.now();
+  let changed = false;
+  try { if (await checkBookings(u)) changed = true; } catch (e) {}
   for (const { b, h } of allActiveBookings(u)) {
     if (b.notified === false && b.notify) {
       const r = await sendTo(u, b.notify,
@@ -545,6 +613,7 @@ async function reminders(u) {
         { reply_markup: { inline_keyboard: [[{ text: '↩️ Отменить бронь', callback_data: `c|${b.id}` }]] } });
     }
   }
+  return changed;
 }
 
 // «Заминка» — только если беда не проходит сама. Раньше сообщение уходило на первом же сбое и
@@ -654,5 +723,5 @@ module.exports = {
   dayPlan, goalSlots, bookedSlots, leftSlots, leftForDay,
   pace, noteResult, expired, autoStop, courtTitle, label, huntLine, statusText,
   sendTo, alertAdmin, who, sweep, offerSlot, findOffer, dropOffer, takeOffer,
-  contactFor, doBook, doCancel, reminders, notifyError, finishHunt, pruneOffers, dropPhantoms
+  contactFor, doBook, doCancel, reminders, checkBookings, notifyError, finishHunt, pruneOffers, dropPhantoms
 };
