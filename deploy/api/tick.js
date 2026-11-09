@@ -93,7 +93,7 @@ async function sweepOnce() {
       await hunt.noteResult(u, h, r);
       results.push({ uid: u.uid, hunt: h.id, ...r });
       any = true; changed = true;
-      if (r && (r.booked || r.found || r.offered || r.error)) important = true;   // события пишем сразу
+      if (r && (r.booked || r.found || r.offered || (r.error && !r.soft && !r.kind))) important = true;   // события пишем сразу; сбои сайта (429, молчит) — не событие
       pace = Math.min(pace, hunt.pace(u, h));
     }
     try { if (await hunt.reminders(u)) { changed = true; important = true; } } catch (e) {}
