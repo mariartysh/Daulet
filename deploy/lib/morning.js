@@ -83,7 +83,7 @@ async function arm() {
         }
         if (!warmed) {
           warmed = true;
-          u.bo = { fails: 0, ban: 0 };            // прошлые сбои не должны тормозить забег
+          u.bo = { fails: 0, ban: 0 }; u.tgFail = null;            // прошлые сбои не должны тормозить забег
           if (!u.targets || now - u.targets.ts > TARGETS_MAX_AGE) u.targets = null;
           // Список кортов читаем ДО 07:00, а не в разгар забега: иначе первая проверка
           // уйдёт на 14 лишних запросов.
