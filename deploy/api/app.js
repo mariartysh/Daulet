@@ -14,7 +14,8 @@ const bookView = b => {
   return {
     id: b.id, title: hunt.courtTitle(b, b.name), when: L.whenText(b.start, 60), start: b.start,
     price: b.price, online: d.online, phone: d.phone, onName: b.onName || '',
-    midnight: L.hm(b.start) === '00:00' || L.hm(b.start) === '01:00'
+    midnight: L.hm(b.start) === '00:00' || L.hm(b.start) === '01:00',
+    status: b.status || 'unknown', tried: !!b.chkAt, chk: b.okAt ? Math.max(0, Math.round((Date.now() - b.okAt) / 60000)) : null
   };
 };
 const offerView = o => ({
@@ -176,6 +177,12 @@ module.exports = async (req, res) => {
         }
         await store.saveUser(u);
         return res.status(200).json(r.ok ? { ok: true } : { ok: false, error: r.why });
+      }
+      case 'checkBookings': {
+        const n = await hunt.checkBookings(u, { force: true });
+        await store.saveUser(u);
+        const act = hunt.allActiveBookings(u).map(x => x.b);
+        return res.status(200).json({ ok: true, cancelled: n, standing: act.filter(b => b.status === 'ok').length, total: act.length, supported: u.recApi !== 'no' });
       }
       case 'takeOffer': {
         const r = await hunt.takeOffer(u, body.id);
