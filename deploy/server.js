@@ -103,7 +103,7 @@ async function serveStatic(pathname, req, res) {
 
 // Для /api/health: когда процесс стартовал и как часто к нему стучится внешний пингер.
 // Если «аптайм» маленький — хостинг перезапускал сервис (обновление, смена переменных, лимиты бесплатного тарифа).
-const stats = global.__chStats = { bootAt: Date.now(), extTick: { last: 0, count: 0, maxGapS: 0 }, selfPing: { last: 0, ok: 0, fail: 0, lastErr: '' } };
+const stats = global.__chStats = { bootAt: Date.now(), extTick: { last: 0, count: 0, maxGapS: 0 }, selfTick: { last: 0, count: 0 }, selfPing: { last: 0, ok: 0, fail: 0, lastErr: '' } };
 
 const server = http.createServer(async (req, res) => {
   shim(res);
@@ -168,6 +168,23 @@ if (KEEPALIVE_MIN > 0 && /^https?:\/\//.test(SELF_URL)) {
   };
   setTimeout(selfPing, 20 * 1000).unref();
   setInterval(selfPing, KEEPALIVE_MIN * 60 * 1000).unref();
+}
+
+// ---------- запасной пингер ----------
+// Фоновая охота держится на вызове /api/tick раз в минуту (cron-job.org). Если внешний пингер замолчал
+// (задание выключилось после серии ошибок, слетел ключ и т. п.), эстафета не поднимется после перезапуска.
+// Поэтому сервис сам зовёт тот же /api/tick — но только когда внешних вызовов давно не было, чтобы не дублировать.
+// Повторные вызовы безопасны: темп проходов держит «затвор» в api/tick.js. Отключить: SELF_TICK_SEC=0.
+const SELF_TICK_SEC = Number(process.env.SELF_TICK_SEC === undefined ? 60 : process.env.SELF_TICK_SEC);
+if (SELF_TICK_SEC > 0) {
+  setInterval(() => {
+    if (!process.env.TICK_KEY) return;
+    const now = Date.now();
+    if (now - stats.extTick.last < SELF_TICK_SEC * 1500) return;     // внешний пингер жив — не мешаем
+    stats.selfTick.last = now; stats.selfTick.count++;
+    fetch(`http://127.0.0.1:${PORT}/api/tick?key=${encodeURIComponent(process.env.TICK_KEY)}`, { signal: AbortSignal.timeout(120000) })
+      .catch(e => console.error('selfTick:', (e && e.message) || e));
+  }, SELF_TICK_SEC * 1000).unref();
 }
 
 // ---------- суточная сводка владельцу (раньше — cron в vercel.json) ----------
