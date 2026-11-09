@@ -33,6 +33,33 @@ const beats = () => store.beats();
 const beat = (strand, run) => store.setBeat(strand, run, 120);
 const drop = () => store.clearBeats();
 
+// ---------- защита от лавины звеньев ----------
+// Раньше при долгой паузе (сайт ответил 429 или не отвечает — пауза 30–150 с) звено не ждало,
+// а сразу передавало эстафету. Подтверждение не успевало увидеть «своё» звено, запускало второго
+// преемника, те — третьих: число звеньев росло как лавина, и каждое ходило в базу.
+// Так за ночь набежало 300+ тысяч обращений к Upstash.
+// Теперь три замка: звено ждёт до конца своего окна, подтверждение засчитывает любое свежее
+// сердцебиение, а запуск звеньев ограничен несколькими в минуту.
+const MAX_LINKS_PER_MIN = Number(process.env.MAX_LINKS_PER_MIN || 8);
+const starts = [];
+function allowLink() {
+  const now = Date.now();
+  while (starts.length && now - starts[0] > 60e3) starts.shift();
+  if (starts.length >= MAX_LINKS_PER_MIN) return false;
+  starts.push(now);
+  return true;
+}
+
+// Общий «затвор» темпа: проход по охотам не чаще, чем решил темп (пауза, бан, замедление).
+// Новое звено, подхватившее эстафету, не может устроить внеочередной проход.
+const gate = { until: 0, any: false };
+const resetGate = () => { gate.until = 0; };
+
+// Сервер получил SIGTERM — новых проходов не начинаем
+let stopping = false;
+const stop = () => { stopping = true; };
+const isStopping = () => stopping;
+
 // Запустить звено ветки. confirm — дождаться, что оно реально ожило.
 async function spawn(req, strand, opts) {
   const o = opts || {};
@@ -41,13 +68,15 @@ async function spawn(req, strand, opts) {
   const run = Math.random().toString(36).slice(2, 9);
   const url = `${base}/api/tick?key=${encodeURIComponent(process.env.TICK_KEY)}&chain=1&strand=${strand}&run=${run}`
     + (o.delay ? `&delay=${o.delay}` : '');
+  const t0 = Date.now();
   for (let a = 0, tries = o.confirm ? 2 : 1; a < tries; a++) {
     fetch(url, { headers: { 'x-chain': '1' }, cache: 'no-store' }).catch(() => {});
     if (!o.confirm) { await sleep(1200); return true; }   // ждём, чтобы запрос успел уйти до заморозки инстанса
     for (let i = 0; i < 4; i++) {
       await sleep(i === 0 ? 1500 : 900);      // холодный старт функции — первую проверку делаем позже, зато реже читаем базу
       const b = await beats().catch(() => null);
-      if (b && b[strand] && b[strand].run === run) return true;
+      // Живо наше звено ИЛИ его уже сменило следующее: любое сердцебиение после запуска значит, что ветка идёт.
+      if (b && b[strand] && (b[strand].run === run || (b[strand].at || 0) >= t0)) return true;
     }
   }
   return false;
@@ -65,4 +94,4 @@ async function revive(req, opts) {
   return started;
 }
 
-module.exports = { STRANDS, USE_B, TTL, sleep, baseUrl, at, alive, aliveList, beat, beats, drop, spawn, revive };
+module.exports = { STRANDS, USE_B, TTL, sleep, baseUrl, at, alive, aliveList, beat, beats, drop, spawn, revive, allowLink, gate, resetGate, stop, isStopping };
